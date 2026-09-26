@@ -838,22 +838,61 @@ def generate_terms(
 ) -> List[str]:
     video_script = utils.remove_pause_tags(video_script or "").strip()
     if match_script_order:
-        goal = (
-            f"Generate {amount} chronological stock-video search terms that follow "
-            "the order of topics in the video script."
-        )
-        ordering_rule = (
-            "6. keep the terms in the same order as the script narration; "
-            "earlier terms must describe earlier visual moments."
-        )
-        # 有序关键词模式下，示例数量要和 amount 保持一致，避免模型被固定
-        # 的 4 个示例误导，导致长文案只返回少量关键词，影响素材覆盖度。
-        example_terms = [
-            "opening visual topic",
-            *[f"script visual topic {index}" for index in range(2, max(amount, 1))],
-            "final visual topic",
+        # In ordered mode, treat narration paragraphs as visual scenes. This avoids
+        # global topic keywords such as "therapy costs" that stock sites can satisfy
+        # with unrelated money/crypto footage.
+        paragraphs = [
+            part.strip()
+            for part in re.split(r"\n\s*\n", video_script)
+            if part.strip()
         ]
-        output_example = json.dumps(example_terms[:amount], ensure_ascii=False)
+        if len(paragraphs) >= 3:
+            amount = min(len(paragraphs), 12)
+        else:
+            sentence_parts = [
+                part.strip()
+                for part in re.split(r"(?<=[.!?])\s+", video_script)
+                if part.strip()
+            ]
+            amount = min(max(len(sentence_parts), 4), 12)
+
+        goal = (
+            f"Generate exactly {amount} chronological, concrete stock-footage "
+            "search queries. Each query represents one visible scene from the "
+            "narration, in narration order."
+        )
+        ordering_rule = """
+6. Keep queries in the same chronological order as the narration.
+7. Each query must describe something a camera could literally film: a person,
+   action, object, place, laboratory process, machine, document, or environment.
+8. Use 4-8 English words per query. Prefer concrete stock-site language over
+   abstract concepts.
+9. Do NOT search abstract ideas directly. Convert them into a visual scene.
+   Example: instead of "high drug cost", use "scientists working pharmaceutical
+   manufacturing laboratory".
+10. Do NOT introduce currencies, countries, flags, brands, logos, crypto,
+    stock-market footage, banknotes, or payment cards unless the narration
+    explicitly mentions that exact visual subject.
+11. Do NOT force the overall video subject into every query. The query should
+    describe the specific shot needed for that scene.
+12. Prefer people, medical/scientific environments, physical actions and real
+    processes when they fit the narration.
+""".strip()
+        visual_examples = [
+            "child struggling to climb stairs indoors",
+            "doctor examining young patient clinic",
+            "medical researcher studying DNA laboratory",
+            "microscope view muscle tissue research",
+            "patient walking slowly physical therapy",
+            "scientists preparing gene therapy laboratory",
+            "sterile pharmaceutical manufacturing production line",
+            "research team reviewing clinical trial data",
+            "scientist inspecting bioreactor medicine production",
+            "researchers discussing laboratory results meeting",
+            "hospital laboratory quality control testing",
+            "medical research facility exterior wide shot",
+        ]
+        output_example = json.dumps(visual_examples[:amount], ensure_ascii=False)
     else:
         goal = (
             f"Generate {amount} search terms for stock videos, depending on the "
@@ -871,12 +910,12 @@ def generate_terms(
 ## Goals:
 {goal}
 
-## Constrains:
-1. the search terms are to be returned as a json-array of strings.
-2. each search term should consist of 1-3 words, always add the main subject of the video.
-3. you must only return the json-array of strings. you must not return anything else. you must not return the script.
-4. the search terms must be related to the subject of the video.
-5. reply with english search terms only.
+## Constraints:
+1. Return a JSON array of strings.
+2. Return only the JSON array. Do not return explanations or the script.
+3. The queries must be visually relevant to the supplied narration.
+4. Reply with English search queries only.
+5. Avoid vague one-word or two-word concepts when a concrete visual description is possible.
 {ordering_rule}
 
 ## Output Example:
@@ -889,7 +928,7 @@ def generate_terms(
 ### Video Script
 {video_script}
 
-Please note that you must use English for generating video search terms; Chinese is not accepted.
+Use English for all search queries.
 """.strip()
 
     logger.info(f"subject: {video_subject}, match_script_order: {match_script_order}")
