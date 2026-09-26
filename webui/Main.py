@@ -124,7 +124,7 @@ LOOMLOOM_MAX_POLL_FAILURES = 5
 # 胜算云、火山引擎排列；其余服务随后展示。这样两个入口的顺序一致，同时
 # 不改变 config.toml、历史任务和 API 请求中的字段语义，旧用户无需迁移配置。
 VIDEO_SOURCE_GROUPS = {
-    "stock_video": ("pexels", "pixabay", "coverr"),
+    "stock_video": ("multi_stock", "pexels", "pixabay", "coverr"),
     "ai_video": (
         "metaso_minimax",
         "ofox",
@@ -5087,6 +5087,7 @@ def _render_video_settings(panel, params):
                 (tr("Random"), "random"),
             ]
             video_source_labels = {
+                "multi_stock": "Multi-Source (Pexels + Pixabay + Coverr)",
                 "pexels": tr("Pexels"),
                 "pixabay": tr("Pixabay"),
                 "coverr": tr("Coverr"),
@@ -5235,7 +5236,7 @@ def _render_video_settings(panel, params):
             #   - 其他 source 沿用 Portrait(index=0)
             #   - 用户在某 source 下手动改过 aspect,session_state 会记住,
             #     下次回到同一 source 时尊重用户选择,不会再被强制覆盖。
-            default_aspect_index = 1 if params.video_source == "coverr" else 0
+            default_aspect_index = 1 if params.video_source in {"coverr", "multi_stock"} else 0
             video_aspect_values = [value for _, value in video_aspect_ratios]
             video_aspect_config_key = f"video_aspect_{params.video_source}"
             selected_aspect_ratio = stable_selectbox(
