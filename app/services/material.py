@@ -6,6 +6,7 @@ import random
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, List
 from urllib.parse import quote_plus, urlencode, urlsplit, urlunsplit
@@ -1683,6 +1684,94 @@ def _search_videos_with_cache(
         return items
 
 
+STOCK_VIDEO_SEARCH_PROVIDERS = {
+    "pexels": search_videos_pexels,
+    "pixabay": search_videos_pixabay,
+    "coverr": search_videos_coverr,
+}
+
+
+def search_videos_multi_stock(
+    search_term: str,
+    minimum_duration: int,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+) -> List[MaterialInfo]:
+    """
+    Search all configured free stock providers in parallel and merge their results.
+
+    A failure in one provider must not abort the whole search. Results are merged
+    round-robin so a single provider cannot monopolize the first candidates.
+    """
+    provider_results: dict[str, List[MaterialInfo]] = {
+        provider: [] for provider in STOCK_VIDEO_SEARCH_PROVIDERS
+    }
+
+    def run_provider(provider: str, search_func):
+        try:
+            items = _search_videos_with_cache(
+                provider=provider,
+                search_videos=search_func,
+                search_term=search_term,
+                minimum_duration=minimum_duration,
+                video_aspect=video_aspect,
+            )
+            logger.info(
+                f"multi-stock search: provider={provider}, term={search_term!r}, "
+                f"results={len(items)}"
+            )
+            return provider, items
+        except Exception as exc:
+            logger.warning(
+                "multi-stock provider failed, continue with remaining providers: "
+                f"provider={provider}, term={search_term!r}, "
+                f"error={type(exc).__name__}, detail={exc}"
+            )
+            return provider, []
+
+    with ThreadPoolExecutor(
+        max_workers=len(STOCK_VIDEO_SEARCH_PROVIDERS),
+        thread_name_prefix="mpt-multi-stock",
+    ) as executor:
+        futures = {
+            executor.submit(run_provider, provider, search_func): provider
+            for provider, search_func in STOCK_VIDEO_SEARCH_PROVIDERS.items()
+        }
+        for future in as_completed(futures):
+            provider, items = future.result()
+            provider_results[provider] = items
+
+    merged: List[MaterialInfo] = []
+    seen = set()
+    provider_order = tuple(STOCK_VIDEO_SEARCH_PROVIDERS.keys())
+    max_results = max((len(items) for items in provider_results.values()), default=0)
+    for index in range(max_results):
+        for provider in provider_order:
+            items = provider_results[provider]
+            if index >= len(items):
+                continue
+            item = items[index]
+            source_info = item.source_info if isinstance(item.source_info, dict) else {}
+            asset_id = source_info.get("asset_id")
+            dedupe_key = (
+                item.provider,
+                str(asset_id) if asset_id not in (None, "") else item.url,
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            merged.append(item)
+
+    logger.info(
+        "multi-stock merged candidates: "
+        f"term={search_term!r}, total={len(merged)}, "
+        + ", ".join(
+            f"{provider}={len(provider_results[provider])}"
+            for provider in provider_order
+        )
+    )
+    return merged
+
+
 def download_videos(
     task_id: str,
     search_terms: List[str],
@@ -1693,27 +1782,30 @@ def download_videos(
     max_clip_duration: int = 5,
     match_script_order: bool = False,
 ) -> List[str]:
-    provider = "pexels"
-    remote_search_videos = search_videos_pexels
-    if source == "pixabay":
-        provider = "pixabay"
-        remote_search_videos = search_videos_pixabay
-    elif source == "coverr":
-        provider = "coverr"
-        remote_search_videos = search_videos_coverr
+    if source == "multi_stock":
+        search_videos = search_videos_multi_stock
+    else:
+        provider = "pexels"
+        remote_search_videos = search_videos_pexels
+        if source == "pixabay":
+            provider = "pixabay"
+            remote_search_videos = search_videos_pixabay
+        elif source == "coverr":
+            provider = "coverr"
+            remote_search_videos = search_videos_coverr
 
-    def search_videos(
-        search_term: str,
-        minimum_duration: int,
-        video_aspect: VideoAspect,
-    ) -> List[MaterialInfo]:
-        return _search_videos_with_cache(
-            provider=provider,
-            search_videos=remote_search_videos,
-            search_term=search_term,
-            minimum_duration=minimum_duration,
-            video_aspect=video_aspect,
-        )
+        def search_videos(
+            search_term: str,
+            minimum_duration: int,
+            video_aspect: VideoAspect,
+        ) -> List[MaterialInfo]:
+            return _search_videos_with_cache(
+                provider=provider,
+                search_videos=remote_search_videos,
+                search_term=search_term,
+                minimum_duration=minimum_duration,
+                video_aspect=video_aspect,
+            )
 
     material_directory = config.app.get("material_directory", "").strip()
     if material_directory == "task":
