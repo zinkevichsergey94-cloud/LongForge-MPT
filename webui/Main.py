@@ -7873,6 +7873,7 @@ def _render_generation_controls(
             voxcpm_prompt_text = _get_voxcpm_prompt_text()
 
         if params.video_source not in [
+            "multi_stock",
             "pexels",
             "pixabay",
             "coverr",
@@ -7887,6 +7888,17 @@ def _render_generation_controls(
         ]:
             _remove_active_generation_task(task_id)
             st.error(tr("Please Select a Valid Video Source"))
+            st.stop()
+
+        if params.video_source == "multi_stock" and not any(
+            config.app.get(key, "")
+            for key in ("pexels_api_keys", "pixabay_api_keys", "coverr_api_keys")
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(
+                "Multi-Source needs at least one configured stock API key "
+                "(Pexels, Pixabay, or Coverr)."
+            )
             st.stop()
 
         if params.video_source == "pexels" and not config.app.get(
