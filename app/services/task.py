@@ -887,7 +887,7 @@ def generate_final_videos(
     combined_video_paths = []
     warnings = []
     allocate_batch_materials = params.video_count > 1 and params.video_source in {
-        "pexels", "pixabay", "coverr", "local"
+        "multi_stock", "pexels", "pixabay", "coverr", "local"
     }
     source_usage = {}
     material_selections = []
