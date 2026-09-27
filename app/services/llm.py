@@ -977,6 +977,141 @@ Use English for all search queries.
     return search_terms
 
 
+
+def rank_visual_candidates_with_vision(
+    *,
+    video_subject: str,
+    search_term: str,
+    candidates: list[dict],
+    app_config=None,
+) -> list[int]:
+    """
+    Rank a small candidate set by looking at thumbnails with the configured OpenAI model.
+
+    This is intentionally optional. If the current LLM provider is not OpenAI, the
+    configured model rejects image input, or the request fails, callers receive the
+    original order and Media Scout continues with metadata ranking.
+    """
+    if not candidates:
+        return []
+
+    runtime_app_config = app_config if app_config is not None else config.app
+    llm_provider = str(
+        runtime_app_config.get("llm_provider", DEFAULT_LLM_PROVIDER_ID)
+    ).lower()
+    if llm_provider != "openai":
+        return list(range(len(candidates)))
+
+    provider = get_llm_provider("openai")
+    if provider is None:
+        return list(range(len(candidates)))
+
+    api_key = str(runtime_app_config.get("openai_api_key", "") or "").strip()
+    if not api_key:
+        return list(range(len(candidates)))
+
+    model_name = provider.resolve_model_name(
+        runtime_app_config.get("openai_model_name", "")
+    )
+    base_url = provider.resolve_base_url(
+        runtime_app_config.get("openai_base_url", "")
+    )
+
+    limited = candidates[:8]
+    content = [
+        {
+            "type": "text",
+            "text": (
+                "You are selecting B-roll for a documentary scene. "
+                "Reject visually irrelevant stock even when keywords overlap. "
+                "Examples of bad matches: banknotes for abstract treatment cost, "
+                "car parts for medical treatment, unrelated flags/currencies, or "
+                "generic objects that do not depict the requested scene.\n\n"
+                f"Video subject: {video_subject}\n"
+                f"Requested scene: {search_term}\n\n"
+                "Return ONLY compact JSON in this exact form: "
+                "{\"ranked\":[{\"id\":0,\"score\":0-100,\"reject\":false}]}. "
+                "Score visual relevance to the requested scene. Reject candidates "
+                "that would confuse a viewer. Do not judge image quality alone."
+            ),
+        }
+    ]
+
+    for index, candidate in enumerate(limited):
+        title = str(candidate.get("title") or "")[:240]
+        description = str(candidate.get("description") or "")[:360]
+        provider_name = str(candidate.get("provider") or "")
+        media_type = str(candidate.get("media_type") or "")
+        thumbnail = str(candidate.get("thumbnail") or "")
+        content.append(
+            {
+                "type": "text",
+                "text": (
+                    f"Candidate {index}: provider={provider_name}; "
+                    f"type={media_type}; title={title!r}; "
+                    f"description={description!r}"
+                ),
+            }
+        )
+        if thumbnail.startswith(("http://", "https://")):
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": thumbnail, "detail": "low"},
+                }
+            )
+
+    if not any(part.get("type") == "image_url" for part in content):
+        return list(range(len(candidates)))
+
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": content}],
+        )
+        raw = _extract_chat_completion_text(response, "openai")
+        payload = json.loads(_strip_code_fence(raw))
+        ranked = payload.get("ranked") if isinstance(payload, dict) else None
+        if not isinstance(ranked, list):
+            return list(range(len(candidates)))
+
+        scored: list[tuple[float, int]] = []
+        rejected: set[int] = set()
+        for row in ranked:
+            if not isinstance(row, dict):
+                continue
+            try:
+                candidate_id = int(row.get("id"))
+                score = float(row.get("score", 0))
+            except (TypeError, ValueError):
+                continue
+            if candidate_id < 0 or candidate_id >= len(limited):
+                continue
+            if bool(row.get("reject")) or score < 50:
+                rejected.add(candidate_id)
+                continue
+            scored.append((score, candidate_id))
+
+        scored.sort(reverse=True)
+        ordered = [candidate_id for _, candidate_id in scored]
+        # Keep any unscored, non-rejected candidates after the AI-approved set so
+        # a partial model response cannot make the scene empty.
+        ordered.extend(
+            index
+            for index in range(len(limited))
+            if index not in ordered and index not in rejected
+        )
+        ordered.extend(range(len(limited), len(candidates)))
+        return ordered or list(range(len(candidates)))
+    except Exception as exc:
+        logger.warning(
+            "Media Scout vision ranking failed; falling back to metadata ranking: "
+            f"error={type(exc).__name__}, detail={_sanitize_error_message(exc)}"
+        )
+        return list(range(len(candidates)))
+
+
 # =============================================================================
 # Social publishing metadata
 #
