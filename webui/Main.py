@@ -5138,6 +5138,14 @@ def _render_video_settings(panel, params):
                 st.caption(tr("Metaso MiniMax H3 Help"))
             if params.video_source == "muapi":
                 st.caption(tr("MuAPI AI Video Help"))
+            if params.video_source == "media_scout":
+                st.caption(
+                    "Media Scout automatically searches stock footage plus Wikimedia "
+                    "Commons, Openverse and Internet Archive. Public/archive media is "
+                    "auto-used only when its machine-readable license is suitable."
+                )
+                st.session_state["match_materials_to_script"] = True
+
             if params.video_source == "local":
                 # Streamlit 的文件类型校验对扩展名大小写敏感，这里同时放行大小写两种形式。
                 local_file_types = sorted(
