@@ -385,6 +385,11 @@ def search_videos_pexels(
                         ),
                         "source_page": _safe_public_url(v.get("url")),
                         "creator": _creator_info(v.get("user")),
+                        "title": str(v.get("title") or ""),
+                        "description": "",
+                        "thumbnail": str(v.get("image") or ""),
+                        "media_type": "video",
+                        "usage_status": "auto",
                         "rendition": {
                             "id": (
                                 str(video.get("id"))
@@ -514,6 +519,11 @@ def search_videos_pixabay(
                                 "name": v.get("user"),
                             }
                         ),
+                        "title": str(v.get("tags") or ""),
+                        "description": str(v.get("tags") or ""),
+                        "thumbnail": str(video.get("thumbnail") or ""),
+                        "media_type": "video",
+                        "usage_status": "auto",
                         "rendition": {
                             "id": video_type,
                             "width": w,
@@ -620,6 +630,11 @@ def search_videos_coverr(
                 "asset_id": str(video_id),
                 "source_page": _safe_public_url(v.get("canonical_url") or v.get("url")),
                 "creator": _creator_info(v.get("creator") or v.get("author")),
+                "title": str(v.get("title") or ""),
+                "description": str(v.get("description") or ""),
+                "thumbnail": str(v.get("thumbnail") or v.get("poster") or ""),
+                "media_type": "video",
+                "usage_status": "auto",
                 "rendition": {
                     "id": "mp4_download",
                     "width": v.get("max_width"),
