@@ -1867,6 +1867,37 @@ def search_media_scout(
         ),
         reverse=True,
     )
+
+    # Final guardrail: when the configured LLM is OpenAI, inspect up to eight
+    # thumbnails and reject visually wrong keyword matches before downloading.
+    try:
+        from app.services import llm
+
+        vision_payload = []
+        for item in merged:
+            source = item.source_info if isinstance(item.source_info, dict) else {}
+            vision_payload.append(
+                {
+                    "provider": item.provider,
+                    "title": source.get("title", ""),
+                    "description": source.get("description", ""),
+                    "thumbnail": source.get("thumbnail", ""),
+                    "media_type": source.get("media_type", "video"),
+                }
+            )
+        order = llm.rank_visual_candidates_with_vision(
+            video_subject=video_subject,
+            search_term=search_term,
+            candidates=vision_payload,
+        )
+        if order:
+            merged = [merged[index] for index in order if 0 <= index < len(merged)]
+    except Exception as exc:
+        logger.warning(
+            "media scout vision verification unavailable; "
+            f"continue with metadata ranking: error={type(exc).__name__}, detail={exc}"
+        )
+
     counts = {
         provider: len(results_by_provider.get(provider, []))
         for provider, _, _ in providers
