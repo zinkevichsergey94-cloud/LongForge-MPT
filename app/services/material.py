@@ -20,6 +20,7 @@ from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
 from app.services import (
     material_cache,
+    media_scout,
     metaso_minimax,
     muapi,
     ofox,
@@ -123,6 +124,19 @@ def _material_source_record(item: MaterialInfo, local_path: str) -> dict[str, An
                 rendition[field] = str(value) if field == "id" else value
         if rendition:
             record["rendition"] = rendition
+
+    # Universal Media Scout keeps licensing and provenance with every selected
+    # asset so the finished task can later produce an attribution/review report.
+    for field in (
+        "media_type",
+        "title",
+        "license",
+        "license_url",
+        "usage_status",
+    ):
+        value = source.get(field)
+        if isinstance(value, str) and value.strip():
+            record[field] = value.strip()
     return record
 
 
@@ -1689,6 +1703,163 @@ STOCK_VIDEO_SEARCH_PROVIDERS = {
     "pixabay": search_videos_pixabay,
     "coverr": search_videos_coverr,
 }
+
+
+def _scout_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", str(text or "").lower())
+        if len(token) >= 3
+        and token not in {
+            "with", "from", "into", "while", "this", "that", "video", "stock",
+            "young", "showing", "scene", "person", "people",
+        }
+    }
+
+
+def _score_scout_candidate(
+    item: MaterialInfo,
+    *,
+    search_term: str,
+    provider_rank: int,
+) -> float:
+    source = item.source_info if isinstance(item.source_info, dict) else {}
+    query_tokens = _scout_tokens(search_term)
+    haystack = " ".join(
+        str(source.get(field) or "")
+        for field in ("title", "description", "search_term")
+    )
+    haystack_tokens = _scout_tokens(haystack)
+    overlap = len(query_tokens & haystack_tokens)
+    phrase_bonus = 2.0 if str(search_term).lower() in haystack.lower() else 0.0
+    media_type = str(source.get("media_type") or "video").lower()
+    usage_status = str(source.get("usage_status") or "auto").lower()
+
+    provider_bonus = {
+        "wikimedia": 4.0,
+        "internet_archive": 3.5,
+        "openverse": 2.5,
+        "pexels": 2.0,
+        "pixabay": 1.8,
+        "coverr": 1.8,
+    }.get(item.provider, 1.0)
+    media_bonus = 1.5 if media_type == "video" else 0.5
+    license_bonus = 1.0 if usage_status == "auto" else 0.0
+    rank_bonus = max(0.0, 2.0 - (provider_rank * 0.15))
+    return (
+        provider_bonus
+        + media_bonus
+        + license_bonus
+        + rank_bonus
+        + phrase_bonus
+        + (overlap * 1.25)
+    )
+
+
+def search_media_scout(
+    search_term: str,
+    minimum_duration: int,
+    video_aspect: VideoAspect = VideoAspect.landscape,
+    *,
+    video_subject: str = "",
+) -> List[MaterialInfo]:
+    """
+    Search stock and public/open archives in parallel, then merge and rank them.
+
+    Stock providers receive the concrete shot query. Public-domain/open-license
+    providers also receive a subject-qualified query so specific material (for
+    example a named disease, historical event or person) can surface instead of
+    only generic stock footage.
+    """
+    providers: list[tuple[str, Callable[..., List[MaterialInfo]], str]] = [
+        ("pexels", search_videos_pexels, search_term),
+        ("pixabay", search_videos_pixabay, search_term),
+        ("coverr", search_videos_coverr, search_term),
+    ]
+    specific_query = " ".join(
+        part.strip() for part in (video_subject, search_term) if str(part or "").strip()
+    )
+    for provider, search_func in media_scout.PUBLIC_SCOUT_PROVIDERS.items():
+        providers.append((provider, search_func, specific_query or search_term))
+
+    results_by_provider: dict[str, List[MaterialInfo]] = {}
+    def run_provider(provider: str, search_func, query: str):
+        try:
+            if provider in STOCK_VIDEO_SEARCH_PROVIDERS:
+                items = _search_videos_with_cache(
+                    provider=provider,
+                    search_videos=search_func,
+                    search_term=query,
+                    minimum_duration=minimum_duration,
+                    video_aspect=video_aspect,
+                )
+            else:
+                items = search_func(
+                    search_term=query,
+                    minimum_duration=minimum_duration,
+                    video_aspect=video_aspect,
+                )
+            return provider, items
+        except Exception as exc:
+            logger.warning(
+                "media scout provider failed, continue with remaining providers: "
+                f"provider={provider}, term={query!r}, "
+                f"error={type(exc).__name__}, detail={exc}"
+            )
+            return provider, []
+
+    with ThreadPoolExecutor(
+        max_workers=min(len(providers), 6),
+        thread_name_prefix="longforge-media-scout",
+    ) as executor:
+        futures = {
+            executor.submit(run_provider, provider, search_func, query): provider
+            for provider, search_func, query in providers
+        }
+        for future in as_completed(futures):
+            provider, items = future.result()
+            results_by_provider[provider] = items
+
+    merged: list[MaterialInfo] = []
+    seen: set[tuple[str, str]] = set()
+    for provider, _, _ in providers:
+        for index, item in enumerate(results_by_provider.get(provider, [])):
+            source = item.source_info if isinstance(item.source_info, dict) else {}
+            if provider in media_scout.PUBLIC_SCOUT_PROVIDERS:
+                usage_status = str(source.get("usage_status") or "reference")
+                if usage_status != "auto":
+                    continue
+            asset_id = str(source.get("asset_id") or item.url)
+            dedupe_key = (item.provider, asset_id)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            source = dict(source)
+            source["scout_score"] = _score_scout_candidate(
+                item,
+                search_term=search_term,
+                provider_rank=index,
+            )
+            item.source_info = source
+            merged.append(item)
+
+    merged.sort(
+        key=lambda item: float(
+            (item.source_info or {}).get("scout_score", 0)
+            if isinstance(item.source_info, dict)
+            else 0
+        ),
+        reverse=True,
+    )
+    counts = {
+        provider: len(results_by_provider.get(provider, []))
+        for provider, _, _ in providers
+    }
+    logger.info(
+        f"media scout merged candidates: term={search_term!r}, "
+        f"subject={video_subject!r}, usable={len(merged)}, providers={counts}"
+    )
+    return merged
 
 
 def search_videos_multi_stock(
