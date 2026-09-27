@@ -744,6 +744,7 @@ def get_video_materials(
                 audio_duration=audio_duration * params.video_count,
                 max_clip_duration=params.video_clip_duration,
                 match_script_order=params.match_materials_to_script,
+                video_subject=params.video_subject,
             )
         except volcengine_seedance.VolcEngineSeedanceError as exc:
             # 未确认状态和已生成但下载失败都对应一个可在方舟控制台恢复的远端
@@ -887,7 +888,7 @@ def generate_final_videos(
     combined_video_paths = []
     warnings = []
     allocate_batch_materials = params.video_count > 1 and params.video_source in {
-        "multi_stock", "pexels", "pixabay", "coverr", "local"
+        "media_scout", "multi_stock", "pexels", "pixabay", "coverr", "local"
     }
     source_usage = {}
     material_selections = []
