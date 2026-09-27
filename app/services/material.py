@@ -1943,6 +1943,176 @@ def search_videos_multi_stock(
     return merged
 
 
+
+def _save_scout_image_as_video(
+    item: MaterialInfo,
+    save_dir: str,
+    clip_duration: int,
+) -> str:
+    if not save_dir:
+        save_dir = utils.storage_dir("cache_images")
+    os.makedirs(save_dir, exist_ok=True)
+
+    source = item.source_info if isinstance(item.source_info, dict) else {}
+    asset_id = str(source.get("asset_id") or item.url)
+    image_stem = f"img-{utils.md5(item.provider + ':' + asset_id)}"
+    image_path = os.path.join(save_dir, f"{image_stem}.jpg")
+
+    if not os.path.exists(image_path) or os.path.getsize(image_path) <= 0:
+        try:
+            response = requests.get(
+                item.url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 Chrome/115 Safari/537.36"
+                    )
+                },
+                proxies=config.proxy,
+                verify=_get_tls_verify(),
+                timeout=(30, 120),
+            )
+            response.raise_for_status()
+            if not response.content:
+                return ""
+            with Image.open(io.BytesIO(response.content)) as img:
+                converted = img.convert("RGB")
+                converted.save(image_path, format="JPEG", quality=94)
+        except Exception as exc:
+            logger.warning(
+                "media scout image download failed: "
+                f"provider={item.provider}, error={type(exc).__name__}, detail={exc}"
+            )
+            return ""
+
+    try:
+        return video.render_image_zoom_video(image_path, max(int(clip_duration), 1))
+    except Exception as exc:
+        logger.warning(
+            "media scout image render failed: "
+            f"provider={item.provider}, path={image_path}, "
+            f"error={type(exc).__name__}, detail={exc}"
+        )
+        return ""
+
+
+def _save_scout_item(
+    item: MaterialInfo,
+    save_dir: str,
+    clip_duration: int,
+) -> str:
+    source = item.source_info if isinstance(item.source_info, dict) else {}
+    media_type = str(source.get("media_type") or "video").lower()
+    if media_type == "image":
+        return _save_scout_image_as_video(item, save_dir, clip_duration)
+    return save_video(video_url=item.url, save_dir=save_dir)
+
+
+def _download_media_scout_videos(
+    *,
+    task_id: str,
+    search_terms: List[str],
+    video_subject: str,
+    video_aspect: VideoAspect,
+    audio_duration: float,
+    max_clip_duration: int,
+    material_directory: str,
+) -> List[str]:
+    """
+    Build an ordered visual track from Universal Media Scout candidates.
+
+    Every narration query gets its own ranked candidate group. We then take one
+    candidate per query per round, preserving narrative order while still using
+    multiple shots when the narration is longer than one pass through the scenes.
+    """
+    logger.info(
+        f"Universal Media Scout started: subject={video_subject!r}, "
+        f"queries={len(search_terms)}"
+    )
+    candidate_groups: list[tuple[str, list[MaterialInfo]]] = []
+    seen_assets: set[tuple[str, str]] = set()
+
+    for search_term in search_terms:
+        items = search_media_scout(
+            search_term=search_term,
+            minimum_duration=max_clip_duration,
+            video_aspect=video_aspect,
+            video_subject=video_subject,
+        )
+        term_items: list[MaterialInfo] = []
+        for item in items[:15]:
+            source = item.source_info if isinstance(item.source_info, dict) else {}
+            asset_id = str(source.get("asset_id") or item.url)
+            key = (item.provider, asset_id)
+            if key in seen_assets:
+                continue
+            seen_assets.add(key)
+            term_items.append(item)
+        if term_items:
+            candidate_groups.append((search_term, term_items))
+        logger.info(
+            f"Universal Media Scout scene candidates: "
+            f"term={search_term!r}, count={len(term_items)}"
+        )
+
+    if not candidate_groups:
+        logger.warning("Universal Media Scout found no auto-usable material")
+        _persist_material_sources(task_id, [])
+        return []
+
+    required_duration = max(float(audio_duration or 0), 0.0)
+    video_paths: list[str] = []
+    material_sources: list[dict[str, Any]] = []
+    total_duration = 0.0
+    candidate_index = 0
+
+    while candidate_groups and (required_duration <= 0 or total_duration < required_duration):
+        has_candidate = False
+        for search_term, term_items in candidate_groups:
+            if candidate_index >= len(term_items):
+                continue
+            has_candidate = True
+            item = term_items[candidate_index]
+            source = item.source_info if isinstance(item.source_info, dict) else {}
+            try:
+                saved_path = _save_scout_item(
+                    item,
+                    material_directory,
+                    max_clip_duration,
+                )
+                if not saved_path:
+                    continue
+                video_paths.append(saved_path)
+                material_sources.append(_material_source_record(item, saved_path))
+                total_duration += min(max_clip_duration, max(int(item.duration or 0), 1))
+                logger.info(
+                    "Universal Media Scout selected: "
+                    f"term={search_term!r}, provider={item.provider}, "
+                    f"title={str(source.get('title') or '')[:120]!r}, "
+                    f"license={source.get('license')!r}, "
+                    f"score={source.get('scout_score')}"
+                )
+                if required_duration > 0 and total_duration >= required_duration:
+                    break
+            except Exception as exc:
+                logger.warning(
+                    "Universal Media Scout candidate failed, trying next candidate: "
+                    f"provider={item.provider}, term={search_term!r}, "
+                    f"error={type(exc).__name__}, detail={exc}"
+                )
+
+        if not has_candidate:
+            break
+        candidate_index += 1
+
+    logger.success(
+        f"Universal Media Scout downloaded/rendered {len(video_paths)} clips, "
+        f"covered={total_duration:.1f}s, required={required_duration:.1f}s"
+    )
+    _persist_material_sources(task_id, material_sources)
+    return video_paths
+
+
 def download_videos(
     task_id: str,
     search_terms: List[str],
@@ -1952,8 +2122,11 @@ def download_videos(
     audio_duration: float = 0.0,
     max_clip_duration: int = 5,
     match_script_order: bool = False,
+    video_subject: str = "",
 ) -> List[str]:
-    if source == "multi_stock":
+    if source == "media_scout":
+        search_videos = None
+    elif source == "multi_stock":
         search_videos = search_videos_multi_stock
     else:
         provider = "pexels"
@@ -1983,6 +2156,17 @@ def download_videos(
         material_directory = utils.task_dir(task_id)
     elif material_directory and not os.path.isdir(material_directory):
         material_directory = ""
+
+    if source == "media_scout":
+        return _download_media_scout_videos(
+            task_id=task_id,
+            search_terms=search_terms,
+            video_subject=video_subject,
+            video_aspect=video_aspect,
+            audio_duration=audio_duration,
+            max_clip_duration=max_clip_duration,
+            material_directory=material_directory,
+        )
 
     if source == "wavespeed":
         # AI 生成按条计费，不能沿用库存源"先为全部关键词取回候选、再挑选"
