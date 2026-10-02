@@ -18,6 +18,10 @@ PROJECT_SCHEMA = "longforge.documentary-workbench"
 PROJECT_VERSION = 1
 ROOT_DIR = Path(__file__).resolve().parents[1]
 PROJECTS_DIR = ROOT_DIR / "storage" / "longforge_projects"
+SAFE_STOCK_PROVIDERS = {"pexels", "pixabay", "coverr"}
+YOUTUBE_SAFE = "SAFE"
+YOUTUBE_REVIEW = "REVIEW"
+YOUTUBE_BLOCK = "DO NOT USE"
 
 
 def utc_now() -> str:
@@ -70,6 +74,7 @@ def new_project(title: str = "Untitled documentary", subject: str = "") -> dict[
         "script": "",
         "fps": 25,
         "aspect": VideoAspect.landscape.value,
+        "youtube_safe_mode": True,
         "created_at": now,
         "updated_at": now,
         "shots": [],
@@ -195,6 +200,181 @@ def material_from_dict(data: dict[str, Any]) -> MaterialInfo:
     return item
 
 
+def youtube_safety(media: dict[str, Any]) -> dict[str, Any]:
+    """Conservative rights-screening helper. It is a workflow guardrail, not legal advice."""
+    info = media.get("source_info") if isinstance(media.get("source_info"), dict) else {}
+    provider = str(media.get("provider") or info.get("provider") or "").strip().lower()
+    usage = str(info.get("usage_status") or "").strip().lower()
+    license_name = str(info.get("license") or "").strip()
+    license_url = str(info.get("license_url") or "").strip()
+    license_text = f"{license_name} {license_url}".lower()
+    rights_confirmed = bool(media.get("rights_confirmed"))
+
+    def result(status: str, reason: str, *, attribution: bool = False) -> dict[str, Any]:
+        return {
+            "status": status,
+            "reason": reason,
+            "requires_attribution": attribution,
+            "rights_confirmed": rights_confirmed,
+        }
+
+    if rights_confirmed and provider == "local":
+        return result(YOUTUBE_SAFE, "User confirmed rights for this local asset.")
+
+    if provider == "local":
+        return result(
+            YOUTUBE_REVIEW,
+            "Local/user-provided media has no machine-verifiable license. Confirm your rights before export.",
+        )
+
+    blocked_terms = (
+        "all rights reserved",
+        "editorial use only",
+        "noncommercial",
+        "non-commercial",
+        "noderivatives",
+        "no derivatives",
+        "cc-by-nc",
+        "cc by-nc",
+        "cc-by-nd",
+        "cc by-nd",
+        "/by-nc/",
+        "/by-nd/",
+    )
+    if any(term in license_text for term in blocked_terms):
+        return result(
+            YOUTUBE_BLOCK,
+            "License contains a restriction that is unsafe for the default commercial YouTube workflow.",
+        )
+
+    if usage in {"reference", "blocked", "restricted"}:
+        return result(
+            YOUTUBE_BLOCK,
+            "Source metadata does not grant automatic reuse rights.",
+        )
+
+    if usage == "review" or "sharealike" in license_text or "by-sa" in license_text:
+        if rights_confirmed:
+            return result(
+                YOUTUBE_SAFE,
+                "License was manually reviewed and confirmed for this use.",
+                attribution=True,
+            )
+        return result(
+            YOUTUBE_REVIEW,
+            "License has conditions that require manual review before export.",
+            attribution=True,
+        )
+
+    if provider in SAFE_STOCK_PROVIDERS and usage == "auto":
+        return result(
+            YOUTUBE_SAFE,
+            f"{provider.title()} candidate passed the provider-license search path.",
+        )
+
+    if any(term in license_text for term in ("public domain", "cc0", "pdm")):
+        return result(YOUTUBE_SAFE, "Public-domain/CC0 metadata detected.")
+
+    has_cc_by = (
+        "cc by" in license_text
+        or "creativecommons.org/licenses/by/" in license_text
+        or "creative commons attribution" in license_text
+    )
+    if has_cc_by:
+        return result(
+            YOUTUBE_SAFE,
+            "Attribution-only Creative Commons license detected.",
+            attribution=True,
+        )
+
+    if usage == "auto" and license_name:
+        return result(
+            YOUTUBE_SAFE,
+            "Media Scout marked this licensed source as automatically reusable.",
+            attribution=True,
+        )
+
+    if rights_confirmed:
+        return result(
+            YOUTUBE_SAFE,
+            "Rights/license were manually reviewed and confirmed for this use.",
+            attribution=True,
+        )
+
+    return result(
+        YOUTUBE_REVIEW,
+        "Rights are not clear enough for automatic YouTube-safe export.",
+    )
+
+
+def annotate_youtube_safety(media: dict[str, Any]) -> dict[str, Any]:
+    annotated = dict(media)
+    annotated["youtube_safety"] = youtube_safety(annotated)
+    return annotated
+
+
+def set_rights_confirmed(selected: dict[str, Any], confirmed: bool) -> None:
+    selected["rights_confirmed"] = bool(confirmed)
+    selected["youtube_safety"] = youtube_safety(selected)
+
+
+def copyright_rows(project: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for shot in selected_shots(project):
+        selected = shot["selected"]
+        assessment = youtube_safety(selected)
+        info = selected.get("source_info") if isinstance(selected.get("source_info"), dict) else {}
+        rows.append(
+            {
+                "shot": shot.get("order"),
+                "status": assessment["status"],
+                "reason": assessment["reason"],
+                "rights_confirmed": assessment["rights_confirmed"],
+                "requires_attribution": assessment["requires_attribution"],
+                "provider": selected.get("provider") or info.get("provider") or "",
+                "title": info.get("title", ""),
+                "license": info.get("license", ""),
+                "license_url": info.get("license_url", ""),
+                "source_page": info.get("source_page", ""),
+                "local_file": Path(str(selected.get("local_path") or "")).name,
+            }
+        )
+    return rows
+
+
+def copyright_summary(project: dict[str, Any]) -> dict[str, Any]:
+    rows = copyright_rows(project)
+    counts = {YOUTUBE_SAFE: 0, YOUTUBE_REVIEW: 0, YOUTUBE_BLOCK: 0}
+    for row in rows:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+    issues = [row for row in rows if row["status"] != YOUTUBE_SAFE]
+    return {"counts": counts, "issues": issues, "rows": rows}
+
+
+def build_copyright_csv(project: dict[str, Any]) -> str:
+    rows = copyright_rows(project)
+    fields = [
+        "shot",
+        "status",
+        "reason",
+        "rights_confirmed",
+        "requires_attribution",
+        "provider",
+        "title",
+        "license",
+        "license_url",
+        "source_page",
+        "local_file",
+    ]
+    from io import StringIO
+
+    buffer = StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fields)
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
+
+
 def search_candidates(
     *,
     subject: str,
@@ -210,7 +390,10 @@ def search_candidates(
         video_aspect=VideoAspect(aspect),
         video_subject=subject.strip(),
     )
-    return [material_to_dict(item) for item in items[: max(1, int(limit))]]
+    return [
+        annotate_youtube_safety(material_to_dict(item))
+        for item in items[: max(1, int(limit))]
+    ]
 
 
 def _copy_into_assets(source_path: Path, target_dir: Path, stem: str) -> Path:
@@ -248,6 +431,7 @@ def select_candidate(
     selected = dict(candidate)
     selected["local_path"] = str(local_path)
     selected["selected_at"] = utc_now()
+    selected["youtube_safety"] = youtube_safety(selected)
     shot["selected"] = selected
     save_project(project)
     return selected
@@ -278,7 +462,9 @@ def save_uploaded_asset(
         },
         "local_path": str(target.resolve()),
         "selected_at": utc_now(),
+        "rights_confirmed": False,
     }
+    selected["youtube_safety"] = youtube_safety(selected)
     shot["selected"] = selected
     save_project(project)
     return selected
@@ -391,6 +577,9 @@ def attribution_rows(project: dict[str, Any]) -> list[dict[str, Any]]:
                 "license_url": info.get("license_url", ""),
                 "source_page": info.get("source_page", ""),
                 "usage_status": info.get("usage_status", ""),
+                "youtube_status": youtube_safety(selected)["status"],
+                "youtube_reason": youtube_safety(selected)["reason"],
+                "rights_confirmed": youtube_safety(selected)["rights_confirmed"],
                 "local_file": Path(str(selected.get("local_path") or "")).name,
                 "query": shot.get("query", ""),
             }
@@ -409,6 +598,9 @@ def build_attribution_csv(project: dict[str, Any]) -> str:
         "license_url",
         "source_page",
         "usage_status",
+        "youtube_status",
+        "youtube_reason",
+        "rights_confirmed",
         "local_file",
         "query",
     ]
@@ -423,14 +615,24 @@ def build_attribution_csv(project: dict[str, Any]) -> str:
 
 def export_project(project: dict[str, Any]) -> dict[str, Path]:
     save_project(project)
+    if bool(project.get("youtube_safe_mode", True)):
+        summary = copyright_summary(project)
+        if summary["issues"]:
+            shot_numbers = ", ".join(str(row["shot"]) for row in summary["issues"][:12])
+            raise ValueError(
+                "YouTube Safe Mode blocked export. Review or replace flagged media "
+                f"in shot(s): {shot_numbers}."
+            )
     export_dir = project_dir(str(project["id"])) / "export"
     export_dir.mkdir(parents=True, exist_ok=True)
     base = safe_slug(str(project.get("title") or "longforge"), "longforge")
     fcpxml_path = export_dir / f"{base}.fcpxml"
     credits_path = export_dir / f"{base}-sources.csv"
     manifest_path = export_dir / f"{base}-timeline.json"
+    copyright_path = export_dir / f"{base}-copyright-report.csv"
     fcpxml_path.write_text(build_fcpxml(project), encoding="utf-8")
     credits_path.write_text(build_attribution_csv(project), encoding="utf-8-sig")
+    copyright_path.write_text(build_copyright_csv(project), encoding="utf-8-sig")
     manifest_path.write_text(
         json.dumps(
             {
@@ -455,4 +657,9 @@ def export_project(project: dict[str, Any]) -> dict[str, Path]:
         ),
         encoding="utf-8",
     )
-    return {"fcpxml": fcpxml_path, "credits": credits_path, "manifest": manifest_path}
+    return {
+        "fcpxml": fcpxml_path,
+        "credits": credits_path,
+        "manifest": manifest_path,
+        "copyright": copyright_path,
+    }
