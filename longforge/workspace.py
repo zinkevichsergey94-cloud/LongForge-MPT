@@ -488,7 +488,7 @@ def _fallback_search_waves(subject: str, query: str, narration: str) -> list[str
     ]
     if narration_words:
         add(" ".join(part for part in (subject, " ".join(narration_words[:10])) if part))
-    return waves[:4]
+    return waves[:3]
 
 
 def _ai_search_waves(subject: str, query: str, narration: str) -> list[str]:
@@ -496,11 +496,10 @@ def _ai_search_waves(subject: str, query: str, narration: str) -> list[str]:
         from app.services import llm
 
         prompt = (
-            "Create exactly 4 concise ENGLISH media-search queries for a documentary shot. "
+            "Create exactly 3 concise ENGLISH media-search queries for a documentary shot. "
             "The queries must be visibly different: (1) exact event/person/object, "
-            "(2) archival/historical wording, (3) broader contextual B-roll, "
-            "(4) documents/maps/science imagery when relevant. Return ONLY a JSON array "
-            "of four strings, no markdown.\n"
+            "(2) archival/historical wording, (3) broader context or documents/maps/science imagery. "
+            "Return ONLY a JSON array of three strings, no markdown.\n"
             f"Topic: {subject}\nShot query: {query}\nNarration: {narration[:900]}"
         )
         raw = llm._generate_response(prompt)
@@ -514,7 +513,7 @@ def _ai_search_waves(subject: str, query: str, narration: str) -> list[str]:
             re.sub(r"\s+", " ", str(item)).strip()[:220]
             for item in parsed
             if str(item).strip()
-        ][:4]
+        ][:3]
     except Exception:
         return []
 
@@ -532,7 +531,7 @@ def build_search_waves(
         normalized = re.sub(r"\s+", " ", str(item or "")).strip()
         if normalized and normalized.lower() not in {w.lower() for w in waves}:
             waves.append(normalized[:220])
-    return waves[:4]
+    return waves[:3]
 
 
 def search_candidates(
