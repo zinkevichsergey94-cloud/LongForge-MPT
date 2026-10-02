@@ -857,9 +857,10 @@ def generate_terms(
             amount = min(max(len(sentence_parts), 4), 12)
 
         goal = (
-            f"Generate exactly {amount} chronological, concrete stock-footage "
-            "search queries. Each query represents one visible scene from the "
-            "narration, in narration order."
+            f"Generate exactly {amount} chronological documentary-media search "
+            "queries. Each query represents one visible scene from the narration, "
+            "in narration order. Queries may target real documentary footage, "
+            "archive material, scientific imagery, diagrams, or stock footage."
         )
         ordering_rule = """
 6. Keep queries in the same chronological order as the narration.
@@ -875,7 +876,13 @@ def generate_terms(
     explicitly mentions that exact visual subject.
 11. Do NOT force the overall video subject into every query. The query should
     describe the specific shot needed for that scene.
-12. Prefer people, medical/scientific environments, physical actions and real
+12. Preserve exact named entities when the narration explicitly names the thing
+    that should be shown. This includes diseases, clinical signs, genes, proteins,
+    therapies, people, places, historical events, documents, devices and molecules.
+    Examples: "Gowers sign child rising from floor", "DMD gene dystrophin diagram".
+13. Prefer real documentary/archive/scientific material over generic stock when
+    the narration refers to a specific real-world subject.
+14. Prefer people, medical/scientific environments, physical actions and real
     processes when they fit the narration.
 """.strip()
         visual_examples = [
@@ -984,13 +991,18 @@ def rank_visual_candidates_with_vision(
     search_term: str,
     candidates: list[dict],
     app_config=None,
-) -> list[int]:
+) -> list[int] | None:
     """
-    Rank a small candidate set by looking at thumbnails with the configured OpenAI model.
+    Hard-filter a small candidate set by looking at thumbnails with OpenAI Vision.
 
-    This is intentionally optional. If the current LLM provider is not OpenAI, the
-    configured model rejects image input, or the request fails, callers receive the
-    original order and Media Scout continues with metadata ranking.
+    Returns:
+      - list[int]: only candidates explicitly approved by vision. The list may be
+        empty when all visible candidates are irrelevant.
+      - None: vision could not run (provider/key/model/thumbnail/API failure). In
+        that case callers may fall back to metadata ranking.
+
+    This distinction is intentional: an empty approved list must never be turned
+    back into random stock footage.
     """
     if not candidates:
         return []
@@ -1000,15 +1012,15 @@ def rank_visual_candidates_with_vision(
         runtime_app_config.get("llm_provider", DEFAULT_LLM_PROVIDER_ID)
     ).lower()
     if llm_provider != "openai":
-        return list(range(len(candidates)))
+        return None
 
     provider = get_llm_provider("openai")
     if provider is None:
-        return list(range(len(candidates)))
+        return None
 
     api_key = str(runtime_app_config.get("openai_api_key", "") or "").strip()
     if not api_key:
-        return list(range(len(candidates)))
+        return None
 
     model_name = provider.resolve_model_name(
         runtime_app_config.get("openai_model_name", "")
@@ -1017,26 +1029,37 @@ def rank_visual_candidates_with_vision(
         runtime_app_config.get("openai_base_url", "")
     )
 
+    # Keep the cost bounded. Eight thumbnails are enough for a strict gate; if
+    # none is acceptable, Media Scout should skip the scene instead of reaching
+    # deeper into low-ranked stock results.
     limited = candidates[:8]
     content = [
         {
             "type": "text",
             "text": (
-                "You are selecting B-roll for a documentary scene. "
-                "Reject visually irrelevant stock even when keywords overlap. "
-                "Examples of bad matches: banknotes for abstract treatment cost, "
-                "car parts for medical treatment, unrelated flags/currencies, or "
-                "generic objects that do not depict the requested scene.\n\n"
-                f"Video subject: {video_subject}\n"
+                "You are a strict documentary footage editor. Your job is to "
+                "REMOVE visually wrong B-roll, not merely rank attractive images.\n\n"
+                f"Documentary subject: {video_subject}\n"
                 f"Requested scene: {search_term}\n\n"
-                "Return ONLY compact JSON in this exact form: "
-                "{\"ranked\":[{\"id\":0,\"score\":0-100,\"reject\":false}]}. "
-                "Score visual relevance to the requested scene. Reject candidates "
-                "that would confuse a viewer. Do not judge image quality alone."
+                "A candidate is acceptable only if a viewer could reasonably say "
+                "that the image itself depicts the requested scene. Mere thematic "
+                "association is NOT enough. Reject landscapes, sunsets, decorative "
+                "backgrounds, generic silhouettes, unrelated streets/buildings, "
+                "money, flags, car parts, or random laboratory imagery unless the "
+                "requested scene explicitly calls for that exact visual. For named "
+                "medical signs, diseases, genes, proteins or therapies, strongly "
+                "prefer specific documentary/scientific material and reject generic "
+                "stock that could mislead the viewer.\n\n"
+                "Score EVERY candidate shown below. Return ONLY compact JSON in "
+                "this exact form: "
+                "{\"ranked\":[{\"id\":0,\"score\":0,\"reject\":true}]}. "
+                "Use score 0-100 for literal visual relevance. Set reject=true "
+                "whenever score is below 75."
             ),
         }
     ]
 
+    image_count = 0
     for index, candidate in enumerate(limited):
         title = str(candidate.get("title") or "")[:240]
         description = str(candidate.get("description") or "")[:360]
@@ -1054,6 +1077,7 @@ def rank_visual_candidates_with_vision(
             }
         )
         if thumbnail.startswith(("http://", "https://")):
+            image_count += 1
             content.append(
                 {
                     "type": "image_url",
@@ -1061,8 +1085,8 @@ def rank_visual_candidates_with_vision(
                 }
             )
 
-    if not any(part.get("type") == "image_url" for part in content):
-        return list(range(len(candidates)))
+    if image_count == 0:
+        return None
 
     try:
         client = OpenAI(api_key=api_key, base_url=base_url)
@@ -1074,10 +1098,10 @@ def rank_visual_candidates_with_vision(
         payload = json.loads(_strip_code_fence(raw))
         ranked = payload.get("ranked") if isinstance(payload, dict) else None
         if not isinstance(ranked, list):
-            return list(range(len(candidates)))
+            return None
 
-        scored: list[tuple[float, int]] = []
-        rejected: set[int] = set()
+        approved: list[tuple[float, int]] = []
+        seen_ids: set[int] = set()
         for row in ranked:
             if not isinstance(row, dict):
                 continue
@@ -1088,28 +1112,28 @@ def rank_visual_candidates_with_vision(
                 continue
             if candidate_id < 0 or candidate_id >= len(limited):
                 continue
-            if bool(row.get("reject")) or score < 50:
-                rejected.add(candidate_id)
+            seen_ids.add(candidate_id)
+            if bool(row.get("reject")) or score < 75:
                 continue
-            scored.append((score, candidate_id))
+            approved.append((score, candidate_id))
 
-        scored.sort(reverse=True)
-        ordered = [candidate_id for _, candidate_id in scored]
-        # Keep any unscored, non-rejected candidates after the AI-approved set so
-        # a partial model response cannot make the scene empty.
-        ordered.extend(
-            index
-            for index in range(len(limited))
-            if index not in ordered and index not in rejected
+        # Missing rows are rejected by default. A partial model response must not
+        # silently re-introduce unverified stock.
+        approved.sort(reverse=True)
+        ordered = [candidate_id for _, candidate_id in approved]
+        logger.info(
+            "Media Scout vision hard filter: "
+            f"scene={search_term!r}, inspected={len(limited)}, "
+            f"reported={len(seen_ids)}, approved={len(ordered)}"
         )
-        ordered.extend(range(len(limited), len(candidates)))
-        return ordered or list(range(len(candidates)))
+        return ordered
     except Exception as exc:
         logger.warning(
-            "Media Scout vision ranking failed; falling back to metadata ranking: "
+            "Media Scout vision hard filter unavailable; "
+            "falling back to metadata ranking: "
             f"error={type(exc).__name__}, detail={_sanitize_error_message(exc)}"
         )
-        return list(range(len(candidates)))
+        return None
 
 
 # =============================================================================
