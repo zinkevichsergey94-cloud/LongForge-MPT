@@ -897,13 +897,38 @@ def build_fcpxml(project: dict[str, Any]) -> str:
         height=str(height),
     )
 
+    narration_audio = (
+        project.get("narration_audio")
+        if isinstance(project.get("narration_audio"), dict)
+        else None
+    )
+    narration_ref = None
+    next_resource_id = 2
+    if narration_audio:
+        narration_path = Path(str(narration_audio.get("path") or ""))
+        narration_duration = float(narration_audio.get("duration") or 0.0)
+        if narration_path.exists() and narration_duration > 0:
+            narration_ref = f"r{next_resource_id}"
+            next_resource_id += 1
+            ET.SubElement(
+                resources,
+                "asset",
+                id=narration_ref,
+                name=narration_path.name,
+                src=_path_to_file_uri(str(narration_path)),
+                start="0s",
+                duration=_seconds_fraction(narration_duration, fps),
+                hasAudio="1",
+            )
+
     asset_refs: list[tuple[dict[str, Any], str]] = []
-    for index, shot in enumerate(clips, start=2):
+    for shot in clips:
         selected = shot["selected"]
         local_path = str(selected.get("local_path") or "")
         if not local_path:
             continue
-        asset_id = f"r{index}"
+        asset_id = f"r{next_resource_id}"
+        next_resource_id += 1
         duration = float(shot.get("duration") or 5)
         info = selected.get("source_info") if isinstance(selected.get("source_info"), dict) else {}
         media_type = str(info.get("media_type") or "video")
@@ -924,7 +949,7 @@ def build_fcpxml(project: dict[str, Any]) -> str:
             "hasVideo": "1",
             "format": format_id,
         }
-        if media_type != "image":
+        if media_type != "image" and bool(selected.get("keep_source_audio", False)):
             attrs["hasAudio"] = "1"
         ET.SubElement(resources, "asset", **attrs)
         asset_refs.append((shot, asset_id))
@@ -962,6 +987,29 @@ def build_fcpxml(project: dict[str, Any]) -> str:
         if narration:
             marker = ET.SubElement(clip, "marker", start="0s", value=narration[:250])
             marker.set("completed", "0")
+
+        if narration_ref is not None:
+            try:
+                narration_start = max(
+                    0.0,
+                    float(shot.get("narration_start") or offset_seconds),
+                )
+            except (TypeError, ValueError):
+                narration_start = offset_seconds
+            ET.SubElement(
+                clip,
+                "asset-clip",
+                name="Narration",
+                ref=narration_ref,
+                lane="-1",
+                start=(
+                    _seconds_fraction(narration_start, fps)
+                    if narration_start > 0
+                    else "0s"
+                ),
+                duration=_seconds_fraction(duration, fps),
+                audioRole="dialogue",
+            )
         offset_seconds += duration
 
     body = ET.tostring(fcpxml, encoding="unicode")
