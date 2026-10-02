@@ -1751,6 +1751,20 @@ def _subject_tokens(text: str) -> set[str]:
     }
 
 
+def _subject_search_hint(text: str, max_tokens: int = 6) -> str:
+    """Keep the named/topic part of a verbose title for archive searches."""
+    ordered = []
+    seen = set()
+    for token in re.findall(r"[a-z0-9]+", str(text or "").lower()):
+        if len(token) < 3 or token in _SUBJECT_NOISE_WORDS or token in seen:
+            continue
+        ordered.append(token)
+        seen.add(token)
+        if len(ordered) >= max_tokens:
+            break
+    return " ".join(ordered)
+
+
 def _score_scout_candidate(
     item: MaterialInfo,
     *,
@@ -1848,8 +1862,9 @@ def search_media_scout(
         ("pixabay", search_videos_pixabay, search_term),
         ("coverr", search_videos_coverr, search_term),
     ]
+    subject_hint = _subject_search_hint(video_subject)
     specific_query = " ".join(
-        part.strip() for part in (video_subject, search_term) if str(part or "").strip()
+        part.strip() for part in (subject_hint, search_term) if str(part or "").strip()
     )
     for provider, search_func in media_scout.PUBLIC_SCOUT_PROVIDERS.items():
         providers.append((provider, search_func, specific_query or search_term))
