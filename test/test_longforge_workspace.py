@@ -233,3 +233,56 @@ def test_apply_transcript_timing_uses_real_pause_boundaries(tmp_path, monkeypatc
     assert project["shots"][1]["narration_start"] == pytest.approx(3.4, abs=0.01)
     assert project["shots"][0]["timing_source"] == "whisper"
     assert project["shots"][1]["timing_source"] == "whisper"
+
+
+
+def test_fcpxml_embeds_narration_dialogue_and_mutes_broll_by_default(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(lf, "PROJECTS_DIR", tmp_path / "projects")
+    video_file = tmp_path / "archive.mp4"
+    audio_file = tmp_path / "narration.wav"
+    video_file.write_bytes(b"video-placeholder")
+    audio_file.write_bytes(b"audio-placeholder")
+
+    project = lf.new_project("Narration XML Test")
+    project["fps"] = 25
+    project["youtube_safe_mode"] = False
+    project["narration_audio"] = {
+        "filename": "narration.wav",
+        "path": str(audio_file),
+        "duration": 6.0,
+    }
+    project["shots"] = [
+        {
+            "id": "shot-1",
+            "order": 1,
+            "narration": "Narration line",
+            "narration_start": 0.0,
+            "narration_end": 6.0,
+            "query": "archive",
+            "duration": 6.0,
+            "notes": "",
+            "candidates": [],
+            "selected": {
+                "provider": "pexels",
+                "duration": 20.0,
+                "local_path": str(video_file),
+                "source_in": 4.0,
+                "source_out": 10.0,
+                "source_info": {
+                    "provider": "pexels",
+                    "media_type": "video",
+                    "usage_status": "auto",
+                    "license": "Pexels License",
+                },
+            },
+        }
+    ]
+
+    xml = lf.build_fcpxml(project)
+
+    assert 'name="Narration"' in xml
+    assert 'lane="-1"' in xml
+    assert 'audioRole="dialogue"' in xml
+    assert xml.count('hasAudio="1"') == 1
