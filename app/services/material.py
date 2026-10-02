@@ -1733,43 +1733,99 @@ def _scout_tokens(text: str) -> set[str]:
     }
 
 
+_SUBJECT_NOISE_WORDS = {
+    "why", "how", "what", "when", "where", "which", "who",
+    "cost", "costs", "costing", "price", "prices", "priced",
+    "expensive", "million", "millions", "dollar", "dollars",
+    "video", "documentary", "explained", "explanation", "real",
+    "true", "story", "stories", "about", "from", "with", "into",
+    "the", "and", "for", "are", "was", "were", "this", "that",
+}
+
+
+def _subject_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in _scout_tokens(text)
+        if token not in _SUBJECT_NOISE_WORDS
+    }
+
+
 def _score_scout_candidate(
     item: MaterialInfo,
     *,
     search_term: str,
+    video_subject: str,
     provider_rank: int,
 ) -> float:
     source = item.source_info if isinstance(item.source_info, dict) else {}
     query_tokens = _scout_tokens(search_term)
+    subject_tokens = _subject_tokens(video_subject)
+
+    # IMPORTANT: never score against source_info.search_term. Every candidate
+    # inherits our own query there, which made unrelated stock look perfectly
+    # relevant even when the provider metadata described something else.
     haystack = " ".join(
         str(source.get(field) or "")
-        for field in ("title", "description", "search_term")
+        for field in ("title", "description")
     )
+    haystack_lower = haystack.lower()
     haystack_tokens = _scout_tokens(haystack)
-    overlap = len(query_tokens & haystack_tokens)
-    phrase_bonus = 2.0 if str(search_term).lower() in haystack.lower() else 0.0
+
+    scene_overlap = len(query_tokens & haystack_tokens)
+    subject_overlap = len(subject_tokens & haystack_tokens)
+    phrase_bonus = (
+        3.0
+        if str(search_term).strip()
+        and str(search_term).strip().lower() in haystack_lower
+        else 0.0
+    )
+
     media_type = str(source.get("media_type") or "video").lower()
     usage_status = str(source.get("usage_status") or "auto").lower()
+    is_archive = item.provider in media_scout.PUBLIC_SCOUT_PROVIDERS
 
     provider_bonus = {
-        "wikimedia": 4.0,
-        "internet_archive": 3.5,
-        "openverse": 2.5,
-        "pexels": 2.0,
-        "pixabay": 1.8,
-        "coverr": 1.8,
-    }.get(item.provider, 1.0)
-    media_bonus = 1.5 if media_type == "video" else 0.5
+        "wikimedia": 5.0,
+        "internet_archive": 4.5,
+        "openverse": 3.5,
+        "pexels": 1.2,
+        "pixabay": 1.0,
+        "coverr": 1.0,
+    }.get(item.provider, 0.5)
+    media_bonus = 1.0 if media_type == "video" else 0.4
     license_bonus = 1.0 if usage_status == "auto" else 0.0
-    rank_bonus = max(0.0, 2.0 - (provider_rank * 0.15))
-    return (
+    rank_bonus = max(0.0, 1.5 - (provider_rank * 0.10))
+
+    # Named-topic evidence matters much more for documentary material than a
+    # generic stock keyword match. This is what makes a real Duchenne result
+    # outrank a random child/wheelchair/laboratory stock clip.
+    topic_bonus = subject_overlap * (3.5 if is_archive else 0.8)
+    scene_bonus = scene_overlap * (1.8 if is_archive else 1.0)
+
+    # Stock with no real metadata evidence must stay a fallback, not win merely
+    # because the provider returned it near the top of its search results.
+    weak_stock_penalty = (
+        4.0
+        if not is_archive and scene_overlap == 0 and subject_overlap == 0
+        else 0.0
+    )
+
+    score = (
         provider_bonus
         + media_bonus
         + license_bonus
         + rank_bonus
         + phrase_bonus
-        + (overlap * 1.25)
+        + scene_bonus
+        + topic_bonus
+        - weak_stock_penalty
     )
+    source["scene_overlap"] = scene_overlap
+    source["subject_overlap"] = subject_overlap
+    source["documentary_exact"] = bool(is_archive and subject_overlap > 0)
+    item.source_info = source
+    return score
 
 
 def search_media_scout(
@@ -1854,6 +1910,7 @@ def search_media_scout(
             source["scout_score"] = _score_scout_candidate(
                 item,
                 search_term=search_term,
+                video_subject=video_subject,
                 provider_rank=index,
             )
             item.source_info = source
@@ -1867,6 +1924,38 @@ def search_media_scout(
         ),
         reverse=True,
     )
+
+    # Documentary-first routing. If a public/open archive result actually names
+    # the video subject in its own metadata, it must be tried before generic stock.
+    # Stock remains available as a fallback for scenes where no exact documentary
+    # material exists.
+    exact_documentary = [
+        item
+        for item in merged
+        if isinstance(item.source_info, dict)
+        and bool(item.source_info.get("documentary_exact"))
+    ]
+    if exact_documentary:
+        exact_keys = {
+            (
+                item.provider,
+                str((item.source_info or {}).get("asset_id") or item.url),
+            )
+            for item in exact_documentary
+        }
+        merged = exact_documentary + [
+            item
+            for item in merged
+            if (
+                item.provider,
+                str((item.source_info or {}).get("asset_id") or item.url),
+            )
+            not in exact_keys
+        ]
+        logger.info(
+            f"media scout documentary-first routing: term={search_term!r}, "
+            f"exact_documentary={len(exact_documentary)}"
+        )
 
     # Final guardrail: when the configured LLM is OpenAI, inspect up to eight
     # thumbnails and reject visually wrong keyword matches before downloading.
