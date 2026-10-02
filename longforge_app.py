@@ -361,6 +361,8 @@ with scout_tab:
                             st.warning(f"REVIEW · {assessment['reason']}")
                         else:
                             st.error(f"DO NOT USE · {assessment['reason']}")
+                        if assessment.get("caveat"):
+                            st.caption(f"Rights caveat: {assessment['caveat']}")
                         st.caption(
                             f"{provider} · {license_name} · {usage}"
                         )
@@ -482,6 +484,8 @@ with timeline_tab:
             if selected and assessment:
                 if assessment["status"] == lf.YOUTUBE_SAFE:
                     st.success(assessment["reason"])
+                    if assessment.get("caveat"):
+                        st.caption(f"Rights caveat: {assessment['caveat']}")
                 elif assessment["status"] == lf.YOUTUBE_REVIEW:
                     st.warning(assessment["reason"])
                     confirmed = st.checkbox(
