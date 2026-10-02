@@ -2017,6 +2017,128 @@ def search_media_scout(
     return merged
 
 
+
+def audit_media_scout_scene(
+    *,
+    video_subject: str,
+    scene: dict,
+    video_aspect: VideoAspect = VideoAspect.landscape,
+    minimum_duration: int = 3,
+) -> dict:
+    """
+    Search a planned documentary scene without downloading media.
+
+    The result is designed for the WebUI: it exposes exactly which providers
+    produced usable candidates and which concrete items reached the top.
+    """
+    queries = scene.get("queries") if isinstance(scene, dict) else []
+    queries = [
+        str(query).strip()
+        for query in queries
+        if isinstance(query, str) and str(query).strip()
+    ][:3]
+    allow_stock = bool(scene.get("allow_stock", True)) if isinstance(scene, dict) else True
+    source_priority = (
+        scene.get("source_priority", [])
+        if isinstance(scene, dict)
+        else []
+    )
+    source_priority = [
+        str(source).strip()
+        for source in source_priority
+        if isinstance(source, str) and str(source).strip()
+    ]
+
+    def source_group(provider: str) -> str:
+        return (
+            "stock"
+            if provider in STOCK_VIDEO_SEARCH_PROVIDERS
+            else provider
+        )
+
+    priority_rank = {
+        source: index for index, source in enumerate(source_priority)
+    }
+
+    provider_counts: dict[str, int] = {}
+    candidates: list[MaterialInfo] = []
+    seen: set[tuple[str, str]] = set()
+    query_results: list[dict] = []
+
+    for query in queries:
+        items = search_media_scout(
+            search_term=query,
+            minimum_duration=minimum_duration,
+            video_aspect=video_aspect,
+            video_subject=video_subject,
+        )
+        if not allow_stock:
+            items = [
+                item
+                for item in items
+                if item.provider not in STOCK_VIDEO_SEARCH_PROVIDERS
+            ]
+
+        query_counts: dict[str, int] = {}
+        for item in items:
+            query_counts[item.provider] = query_counts.get(item.provider, 0) + 1
+            provider_counts[item.provider] = provider_counts.get(item.provider, 0) + 1
+            source = item.source_info if isinstance(item.source_info, dict) else {}
+            key = (
+                item.provider,
+                str(source.get("asset_id") or item.url),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(item)
+
+        query_results.append(
+            {
+                "query": query,
+                "provider_counts": query_counts,
+                "usable": len(items),
+            }
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            priority_rank.get(source_group(item.provider), 999),
+            -float(
+                (item.source_info or {}).get("scout_score", 0)
+                if isinstance(item.source_info, dict)
+                else 0
+            ),
+        )
+    )
+
+    top_results = []
+    for item in candidates[:8]:
+        source = item.source_info if isinstance(item.source_info, dict) else {}
+        top_results.append(
+            {
+                "provider": item.provider,
+                "title": str(source.get("title") or "").strip(),
+                "description": str(source.get("description") or "").strip()[:240],
+                "source_page": str(source.get("source_page") or "").strip(),
+                "license": str(source.get("license") or "").strip(),
+                "usage_status": str(source.get("usage_status") or "").strip(),
+                "media_type": str(source.get("media_type") or "video").strip(),
+                "score": source.get("scout_score"),
+            }
+        )
+
+    return {
+        "scene": scene.get("scene") if isinstance(scene, dict) else None,
+        "visual_goal": str(scene.get("visual_goal") or "") if isinstance(scene, dict) else "",
+        "allow_stock": allow_stock,
+        "source_priority": source_priority,
+        "queries": query_results,
+        "provider_counts": provider_counts,
+        "top_results": top_results,
+    }
+
+
 def search_videos_multi_stock(
     search_term: str,
     minimum_duration: int,
