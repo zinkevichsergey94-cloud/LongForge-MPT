@@ -1126,6 +1126,8 @@ def _prepare_portable_export_project(
         selected["package_path"] = f"media/{target.name}"
 
     narration_export_path = None
+    if audio_dir.exists():
+        shutil.rmtree(audio_dir)
     narration_audio = (
         portable.get("narration_audio")
         if isinstance(portable.get("narration_audio"), dict)
@@ -1134,8 +1136,6 @@ def _prepare_portable_export_project(
     if narration_audio:
         source_audio = Path(str(narration_audio.get("path") or ""))
         if source_audio.exists() and source_audio.is_file():
-            if audio_dir.exists():
-                shutil.rmtree(audio_dir)
             audio_dir.mkdir(parents=True, exist_ok=True)
             narration_export_path = audio_dir / (
                 f"narration{source_audio.suffix.lower() or '.wav'}"
