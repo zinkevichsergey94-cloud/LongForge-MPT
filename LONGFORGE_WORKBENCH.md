@@ -62,3 +62,24 @@ Safe Mode is enabled by default. It screens each selected asset conservatively:
 When Safe Mode is on, DaVinci export is disabled until every selected shot is SAFE. REVIEW assets can become SAFE only after the user explicitly confirms that the rights/license were checked. DO NOT USE search results cannot be selected from Media Scout. A copyright CSV can be downloaded before export and is also included in the final export package.
 
 This is a conservative production guardrail, not a legal opinion or a guarantee against Content ID claims.
+
+
+## Narration-aware timeline
+
+The workbench can now ingest the final narration audio and read its real duration. Sync shots to narration distributes the timeline across the narration while preserving shot order and stores narration start/end timestamps on every shot.
+
+## Multi-wave media search
+
+A shot is no longer searched with one phrase only. LongForge can create up to three search waves per shot:
+
+1. exact subject/event/object;
+2. archival or historical phrasing;
+3. broader context, documents, maps, science imagery or B-roll.
+
+If the configured LLM is available, it proposes English search phrases. If it is unavailable, LongForge falls back to local query expansion. Candidates are deduplicated across waves and retain the query/wave that found them.
+
+## Source trimming
+
+Selected video media now has a source in-point. The source out-point is derived from the narration-controlled shot duration, so changing the chosen moment does not break voice synchronization. The FCPXML export carries the source in-point into DaVinci Resolve.
+
+For long publicly reachable source videos, an optional TwelveLabs/Pegasus Smart Trim button can suggest the strongest matching moment. It is disabled when no TwelveLabs key is configured and is never required for the normal workflow.
