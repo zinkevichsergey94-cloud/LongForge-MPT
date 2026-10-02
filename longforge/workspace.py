@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import csv
 import json
 import math
@@ -1086,6 +1087,66 @@ def build_attribution_csv(project: dict[str, Any]) -> str:
     return buffer.getvalue()
 
 
+def _prepare_portable_export_project(
+    project: dict[str, Any],
+    export_dir: Path,
+) -> tuple[dict[str, Any], Path | None]:
+    portable = copy.deepcopy(project)
+
+    media_dir = export_dir / "media"
+    audio_dir = export_dir / "audio"
+    if media_dir.exists():
+        shutil.rmtree(media_dir)
+    media_dir.mkdir(parents=True, exist_ok=True)
+
+    copied_media: dict[str, Path] = {}
+    for shot in portable.get("shots") or []:
+        selected = shot.get("selected") if isinstance(shot.get("selected"), dict) else None
+        if not selected:
+            continue
+        source = Path(str(selected.get("local_path") or ""))
+        if not source.exists() or not source.is_file():
+            raise FileNotFoundError(
+                f"Selected media for shot {shot.get('order')} is missing: {source}"
+            )
+        source_key = str(source.resolve())
+        target = copied_media.get(source_key)
+        if target is None:
+            prefix = f"{int(shot.get('order') or 0):03d}"
+            target = media_dir / f"{prefix}-{safe_slug(source.stem, 'asset')}{source.suffix.lower()}"
+            counter = 2
+            while target.exists():
+                target = media_dir / (
+                    f"{prefix}-{safe_slug(source.stem, 'asset')}-{counter}{source.suffix.lower()}"
+                )
+                counter += 1
+            shutil.copy2(source, target)
+            copied_media[source_key] = target
+        selected["local_path"] = str(target.resolve())
+        selected["package_path"] = f"media/{target.name}"
+
+    narration_export_path = None
+    narration_audio = (
+        portable.get("narration_audio")
+        if isinstance(portable.get("narration_audio"), dict)
+        else None
+    )
+    if narration_audio:
+        source_audio = Path(str(narration_audio.get("path") or ""))
+        if source_audio.exists() and source_audio.is_file():
+            if audio_dir.exists():
+                shutil.rmtree(audio_dir)
+            audio_dir.mkdir(parents=True, exist_ok=True)
+            narration_export_path = audio_dir / (
+                f"narration{source_audio.suffix.lower() or '.wav'}"
+            )
+            shutil.copy2(source_audio, narration_export_path)
+            narration_audio["path"] = str(narration_export_path.resolve())
+            narration_audio["package_path"] = f"audio/{narration_export_path.name}"
+
+    return portable, narration_export_path
+
+
 def export_project(project: dict[str, Any]) -> dict[str, Path]:
     save_project(project)
     if bool(project.get("youtube_safe_mode", True)):
@@ -1096,49 +1157,49 @@ def export_project(project: dict[str, Any]) -> dict[str, Path]:
                 "YouTube Safe Mode blocked export. Review or replace flagged media "
                 f"in shot(s): {shot_numbers}."
             )
+
     export_dir = project_dir(str(project["id"])) / "export"
     export_dir.mkdir(parents=True, exist_ok=True)
+    portable_project, narration_export_path = _prepare_portable_export_project(
+        project,
+        export_dir,
+    )
+
     base = safe_slug(str(project.get("title") or "longforge"), "longforge")
     fcpxml_path = export_dir / f"{base}.fcpxml"
     credits_path = export_dir / f"{base}-sources.csv"
     manifest_path = export_dir / f"{base}-timeline.json"
     copyright_path = export_dir / f"{base}-copyright-report.csv"
-    narration_export_path = None
-    narration_audio = (
-        project.get("narration_audio")
-        if isinstance(project.get("narration_audio"), dict)
-        else None
-    )
-    if narration_audio:
-        source_audio = Path(str(narration_audio.get("path") or ""))
-        if source_audio.exists() and source_audio.is_file():
-            narration_export_path = export_dir / (
-                f"{base}-narration{source_audio.suffix.lower() or '.wav'}"
-            )
-            if source_audio.resolve() != narration_export_path.resolve():
-                shutil.copy2(source_audio, narration_export_path)
 
-    fcpxml_path.write_text(build_fcpxml(project), encoding="utf-8")
-    credits_path.write_text(build_attribution_csv(project), encoding="utf-8-sig")
-    copyright_path.write_text(build_copyright_csv(project), encoding="utf-8-sig")
+    fcpxml_path.write_text(build_fcpxml(portable_project), encoding="utf-8")
+    credits_path.write_text(
+        build_attribution_csv(portable_project),
+        encoding="utf-8-sig",
+    )
+    copyright_path.write_text(
+        build_copyright_csv(portable_project),
+        encoding="utf-8-sig",
+    )
     manifest_path.write_text(
         json.dumps(
             {
                 "schema": "longforge.timeline-manifest",
                 "version": 1,
-                "project": project.get("title"),
-                "fps": project.get("fps"),
-                "aspect": project.get("aspect"),
-                "narration_audio": project.get("narration_audio"),
+                "project": portable_project.get("title"),
+                "fps": portable_project.get("fps"),
+                "aspect": portable_project.get("aspect"),
+                "narration_audio": portable_project.get("narration_audio"),
                 "shots": [
                     {
                         "order": shot.get("order"),
                         "narration": shot.get("narration"),
                         "query": shot.get("query"),
                         "duration": shot.get("duration"),
+                        "narration_start": shot.get("narration_start"),
+                        "narration_end": shot.get("narration_end"),
                         "media": shot.get("selected"),
                     }
-                    for shot in selected_shots(project)
+                    for shot in selected_shots(portable_project)
                 ],
             },
             ensure_ascii=False,
@@ -1146,11 +1207,13 @@ def export_project(project: dict[str, Any]) -> dict[str, Path]:
         ),
         encoding="utf-8",
     )
+
     exported = {
         "fcpxml": fcpxml_path,
         "credits": credits_path,
         "manifest": manifest_path,
         "copyright": copyright_path,
+        "media_dir": export_dir / "media",
     }
     if narration_export_path is not None:
         exported["narration"] = narration_export_path
