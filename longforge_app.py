@@ -132,6 +132,14 @@ with st.sidebar:
             index=fps_options.index(int(project.get("fps") or 25)),
         )
     )
+    project["youtube_safe_mode"] = st.toggle(
+        "YouTube Safe Mode",
+        value=bool(project.get("youtube_safe_mode", True)),
+        help=(
+            "When enabled, DaVinci export is blocked if any selected media is "
+            "DO NOT USE or still requires manual rights review."
+        ),
+    )
     if st.button("Save project", type="primary", use_container_width=True):
         persist()
         st.toast("Project saved")
@@ -345,6 +353,14 @@ with scout_tab:
                             thumb,
                         ) = candidate_label(candidate)
                         st.markdown(f"**{title[:100]}**")
+                        assessment = lf.youtube_safety(candidate)
+                        status = assessment["status"]
+                        if status == lf.YOUTUBE_SAFE:
+                            st.success(f"SAFE · {assessment['reason']}")
+                        elif status == lf.YOUTUBE_REVIEW:
+                            st.warning(f"REVIEW · {assessment['reason']}")
+                        else:
+                            st.error(f"DO NOT USE · {assessment['reason']}")
                         st.caption(
                             f"{provider} · {license_name} · {usage}"
                         )
@@ -372,6 +388,7 @@ with scout_tab:
                             "Use this shot",
                             key=f"pick_{shot['id']}_{candidate_index}",
                             use_container_width=True,
+                            disabled=(status == lf.YOUTUBE_BLOCK),
                         ):
                             with st.spinner("Downloading selected media…"):
                                 try:
@@ -451,15 +468,33 @@ with timeline_tab:
                 if selected
                 else ""
             )
+            assessment = lf.youtube_safety(selected) if selected else None
+            safety_label = f" · {assessment['status']}" if assessment else ""
             cls = "lf-shot lf-picked" if selected else "lf-shot"
             st.markdown(
                 f'<div class="{cls}"><b>{shot["order"]:03d}</b> · '
                 f'{float(shot.get("duration") or 0):.1f}s · '
-                f'{provider or "NO MEDIA"}<br>'
+                f'{provider or "NO MEDIA"}{safety_label}<br>'
                 f'<span class="lf-muted">{filename}</span><br>'
                 f'{str(shot.get("narration") or "")[:180]}</div>',
                 unsafe_allow_html=True,
             )
+            if selected and assessment:
+                if assessment["status"] == lf.YOUTUBE_SAFE:
+                    st.success(assessment["reason"])
+                elif assessment["status"] == lf.YOUTUBE_REVIEW:
+                    st.warning(assessment["reason"])
+                    confirmed = st.checkbox(
+                        "I verified that I have the rights/license to use this media on YouTube",
+                        value=bool(selected.get("rights_confirmed")),
+                        key=f"rights_{shot['id']}",
+                    )
+                    if confirmed != bool(selected.get("rights_confirmed")):
+                        lf.set_rights_confirmed(selected, confirmed)
+                        persist()
+                        st.rerun()
+                else:
+                    st.error(assessment["reason"])
             a, b, c = st.columns([0.12, 0.12, 0.76])
             with a:
                 if st.button(
@@ -491,7 +526,17 @@ with timeline_tab:
 with export_tab:
     selected = lf.selected_shots(project)
     missing = len(project.get("shots") or []) - len(selected)
+    copyright_summary = lf.copyright_summary(project)
+    counts = copyright_summary["counts"]
     st.subheader("DaVinci handoff")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("SAFE", counts.get(lf.YOUTUBE_SAFE, 0))
+    m2.metric("REVIEW", counts.get(lf.YOUTUBE_REVIEW, 0))
+    m3.metric("DO NOT USE", counts.get(lf.YOUTUBE_BLOCK, 0))
+    if bool(project.get("youtube_safe_mode", True)):
+        st.info("YouTube Safe Mode is ON. Export is blocked until every selected shot is SAFE.")
+    else:
+        st.warning("YouTube Safe Mode is OFF. Export will include flagged media and only warn you.")
     st.write(
         "Export creates an **FCPXML timeline**, a **JSON timeline manifest**, "
         "and a **source/license CSV**. Import the FCPXML into DaVinci Resolve; "
@@ -502,6 +547,15 @@ with export_tab:
             f"{missing} shots still have no media. They will be omitted "
             "from the exported timeline."
         )
+    if copyright_summary["issues"]:
+        st.markdown("### Copyright review")
+        for row in copyright_summary["issues"]:
+            label = f"Shot {row['shot']:03d} · {row['status']} · {row['provider']}"
+            if row["status"] == lf.YOUTUBE_BLOCK:
+                st.error(f"{label}: {row['reason']}")
+            else:
+                st.warning(f"{label}: {row['reason']}")
+
     if not selected:
         st.info("Select at least one media item before export.")
     elif st.button(
@@ -521,6 +575,7 @@ with export_tab:
             ("fcpxml", "Download FCPXML", "application/xml"),
             ("manifest", "Download timeline JSON", "application/json"),
             ("credits", "Download source/license CSV", "text/csv"),
+            ("copyright", "Download copyright report CSV", "text/csv"),
         ]:
             path = Path(exported[key])
             if path.exists():
