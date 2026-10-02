@@ -87,7 +87,7 @@ def test_safe_mode_blocks_export_until_review_is_resolved(tmp_path, monkeypatch)
     lf.set_rights_confirmed(project["shots"][0]["selected"], True)
     exported = lf.export_project(project)
 
-    assert set(exported) == {"fcpxml", "credits", "manifest", "copyright"}
+    assert {"fcpxml", "credits", "manifest", "copyright", "media_dir"} <= set(exported)
     assert all(Path(path).exists() for path in exported.values())
     assert "SAFE" in Path(exported["copyright"]).read_text(encoding="utf-8-sig")
 
@@ -398,3 +398,62 @@ def test_fcpxml_can_keep_original_broll_audio(tmp_path):
     assert asset.get("hasAudio") == "1"
     clip = root.find(".//spine/asset-clip")
     assert clip.get("srcEnable") == "all"
+
+
+
+def test_export_project_builds_portable_media_and_audio_package(tmp_path, monkeypatch):
+    monkeypatch.setattr(lf, "PROJECTS_DIR", tmp_path / "projects")
+    narration = tmp_path / "voice.wav"
+    narration.write_bytes(b"voice")
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+
+    project = lf.new_project("Portable Package")
+    project["youtube_safe_mode"] = False
+    project["narration_audio"] = {
+        "filename": "voice.wav",
+        "path": str(narration),
+        "duration": 8.0,
+    }
+    project["shots"] = [
+        {
+            "id": "shot-1",
+            "order": 1,
+            "narration": "Narration.",
+            "narration_start": 0.0,
+            "narration_end": 5.0,
+            "query": "archive",
+            "duration": 5.0,
+            "notes": "",
+            "candidates": [],
+            "selected": {
+                "provider": "pexels",
+                "duration": 12.0,
+                "local_path": str(video),
+                "source_in": 2.0,
+                "source_info": {
+                    "provider": "pexels",
+                    "media_type": "video",
+                    "usage_status": "auto",
+                    "license": "Pexels License",
+                },
+            },
+        }
+    ]
+
+    exported = lf.export_project(project)
+
+    media_files = list(Path(exported["media_dir"]).glob("*"))
+    assert len(media_files) == 1
+    assert media_files[0].read_bytes() == b"video"
+
+    assert "narration" in exported
+    assert Path(exported["narration"]).read_bytes() == b"voice"
+
+    xml_text = Path(exported["fcpxml"]).read_text(encoding="utf-8")
+    assert media_files[0].resolve().as_uri() in xml_text
+    assert Path(exported["narration"]).resolve().as_uri() in xml_text
+
+    manifest = Path(exported["manifest"]).read_text(encoding="utf-8")
+    assert '"package_path": "media/' in manifest
+    assert '"package_path": "audio/' in manifest
