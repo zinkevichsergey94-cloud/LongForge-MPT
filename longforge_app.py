@@ -547,6 +547,16 @@ with export_tab:
             f"{missing} shots still have no media. They will be omitted "
             "from the exported timeline."
         )
+    if selected:
+        st.download_button(
+            "Download current copyright report",
+            data=lf.build_copyright_csv(project).encode("utf-8-sig"),
+            file_name=f"{lf.safe_slug(str(project.get('title') or 'longforge'))}-copyright-report.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="download_live_copyright_report",
+        )
+
     if copyright_summary["issues"]:
         st.markdown("### Copyright review")
         for row in copyright_summary["issues"]:
@@ -556,12 +566,19 @@ with export_tab:
             else:
                 st.warning(f"{label}: {row['reason']}")
 
+    safe_mode_blocked = bool(project.get("youtube_safe_mode", True)) and bool(copyright_summary["issues"])
     if not selected:
         st.info("Select at least one media item before export.")
     elif st.button(
         "Build DaVinci package",
         type="primary",
         use_container_width=True,
+        disabled=safe_mode_blocked,
+        help=(
+            "Resolve the copyright review above or turn off YouTube Safe Mode."
+            if safe_mode_blocked
+            else None
+        ),
     ):
         try:
             st.session_state.lf_last_export = lf.export_project(project)
