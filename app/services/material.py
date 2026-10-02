@@ -389,6 +389,13 @@ def search_videos_pexels(
                         "description": "",
                         "thumbnail": str(v.get("image") or ""),
                         "media_type": "video",
+                        "license": "Pexels License",
+                        "license_url": "https://www.pexels.com/license/",
+                        "rights_note": (
+                            "Commercial use is allowed under the Pexels License, but "
+                            "depicted people, brands, trademarks or copyrighted works "
+                            "may have separate rights."
+                        ),
                         "usage_status": "auto",
                         "rendition": {
                             "id": (
@@ -523,6 +530,12 @@ def search_videos_pixabay(
                         "description": str(v.get("tags") or ""),
                         "thumbnail": str(video.get("thumbnail") or ""),
                         "media_type": "video",
+                        "license": "Pixabay Content License",
+                        "license_url": "https://pixabay.com/service/license-summary/",
+                        "rights_note": (
+                            "Pixabay permits licensed use, but recognizable trademarks, "
+                            "people and other third-party rights may require separate consent."
+                        ),
                         "usage_status": "auto",
                         "rendition": {
                             "id": video_type,
@@ -634,6 +647,12 @@ def search_videos_coverr(
                 "description": str(v.get("description") or ""),
                 "thumbnail": str(v.get("thumbnail") or v.get("poster") or ""),
                 "media_type": "video",
+                "license": "Coverr License",
+                "license_url": "https://coverr.co/license/",
+                "rights_note": (
+                    "Coverr permits commercial use, but brands, trademarks, properties "
+                    "and other depicted third-party rights still require context review."
+                ),
                 "usage_status": "auto",
                 "rendition": {
                     "id": "mp4_download",
