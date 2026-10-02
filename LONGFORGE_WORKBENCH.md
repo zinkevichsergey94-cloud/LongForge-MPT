@@ -38,6 +38,9 @@ Double-click `longforge.bat` (or run it from a terminal). Default address: `http
 - DaVinci-compatible FCPXML handoff
 - JSON timeline manifest
 - source/license CSV
+- YouTube Safe Mode with SAFE / REVIEW / DO NOT USE classification
+- hard export gate for unresolved rights issues (enabled by default)
+- downloadable copyright review report before DaVinci export
 
 ## Next engineering steps
 
@@ -47,3 +50,15 @@ Double-click `longforge.bat` (or run it from a terminal). Default address: `http
 - range selection (in/out points) for long source clips
 - drag-and-drop timeline UI
 - DaVinci round-trip metadata and optional Resolve scripting bridge
+
+## YouTube Safe Mode
+
+Safe Mode is enabled by default. It screens each selected asset conservatively:
+
+- **SAFE** — stock/provider-license path, public domain/CC0, or attribution-only CC BY metadata.
+- **REVIEW** — rights are not machine-verifiable (for example a local upload) or the license has conditions that need a manual check.
+- **DO NOT USE** — metadata indicates non-commercial/no-derivatives/editorial-only/all-rights-reserved or otherwise does not grant reuse rights.
+
+When Safe Mode is on, DaVinci export is disabled until every selected shot is SAFE. REVIEW assets can become SAFE only after the user explicitly confirms that the rights/license were checked. DO NOT USE search results cannot be selected from Media Scout. A copyright CSV can be downloaded before export and is also included in the final export package.
+
+This is a conservative production guardrail, not a legal opinion or a guarantee against Content ID claims.
