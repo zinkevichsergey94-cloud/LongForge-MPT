@@ -83,3 +83,12 @@ If the configured LLM is available, it proposes English search phrases. If it is
 Selected video media now has a source in-point. The source out-point is derived from the narration-controlled shot duration, so changing the chosen moment does not break voice synchronization. The FCPXML export carries the source in-point into DaVinci Resolve.
 
 For long publicly reachable source videos, an optional TwelveLabs/Pegasus Smart Trim button can suggest the strongest matching moment. It is disabled when no TwelveLabs key is configured and is never required for the normal workflow.
+
+
+## Precise local narration timing
+
+Besides the fast proportional sync, the workbench now has an opt-in Precise local timing action. It reuses the existing faster-whisper integration, reads real speech segments and pauses, aligns them sequentially to the documentary shots, and stores per-shot narration start/end timestamps. This runs locally and does not consume an API budget.
+
+## Narration in FCPXML
+
+When a final narration file is attached to the project, LongForge exports a copy of that audio and references it in FCPXML as dialogue slices aligned to the corresponding shot. B-roll source audio is excluded by default, so stock/archive clips do not unexpectedly add their own sound under the narration. Source video in-points are preserved separately.
