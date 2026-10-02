@@ -5,6 +5,7 @@ import json
 import math
 import re
 import shutil
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from xml.etree import ElementTree as ET
 from moviepy import AudioFileClip, VideoFileClip
 
 from app.models.schema import MaterialInfo, VideoAspect
-from app.services import material, twelvelabs
+from app.services import material, subtitle, twelvelabs
 
 PROJECT_SCHEMA = "longforge.documentary-workbench"
 PROJECT_VERSION = 1
@@ -184,6 +185,135 @@ def sync_shot_durations_to_narration(
             set_source_in(shot, float(shot["selected"].get("source_in") or 0.0))
     save_project(project)
     return [round(value, 3) for value in durations]
+
+
+def _normalize_alignment_text(value: str) -> str:
+    return re.sub(r"[^\w]+", "", str(value or "").lower(), flags=re.UNICODE)
+
+
+def _parse_srt_timestamp(value: str) -> float:
+    hours, minutes, rest = value.strip().split(":")
+    seconds, millis = rest.split(",")
+    return (
+        int(hours) * 3600
+        + int(minutes) * 60
+        + int(seconds)
+        + int(millis) / 1000.0
+    )
+
+
+def _subtitle_segments_from_srt(path: str | Path) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    for _, timing, text in subtitle.file_to_subtitles(str(path)):
+        match = re.match(
+            r"\s*(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*"
+            r"(\d{2}:\d{2}:\d{2},\d{3})",
+            timing,
+        )
+        if not match:
+            continue
+        try:
+            start = _parse_srt_timestamp(match.group(1))
+            end = _parse_srt_timestamp(match.group(2))
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        segments.append({"start": start, "end": end, "text": str(text or "").strip()})
+    return segments
+
+
+def apply_transcript_timing(
+    project: dict[str, Any],
+    segments: list[dict[str, Any]],
+    total_duration: float,
+) -> list[float]:
+    shots = project.get("shots") or []
+    total_duration = max(0.0, float(total_duration or 0.0))
+    if not shots or not segments or total_duration <= 0:
+        return []
+
+    if len(segments) < len(shots):
+        return sync_shot_durations_to_narration(project)
+
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for shot_index, shot in enumerate(shots):
+        if shot_index == len(shots) - 1:
+            spans.append((cursor, len(segments) - 1))
+            cursor = len(segments)
+            break
+
+        target = _normalize_alignment_text(str(shot.get("narration") or ""))
+        if not target:
+            spans.append((cursor, cursor))
+            cursor += 1
+            continue
+
+        best_end = cursor
+        best_score = -1.0
+        combined = ""
+        max_end = min(len(segments), cursor + 14)
+        for end_index in range(cursor, max_end):
+            combined += _normalize_alignment_text(segments[end_index].get("text", ""))
+            score = SequenceMatcher(None, target, combined).ratio()
+            length_ratio = len(combined) / max(len(target), 1)
+            if 0.45 <= length_ratio <= 1.8:
+                score += 0.08
+            if score > best_score:
+                best_score = score
+                best_end = end_index
+            if len(combined) > max(len(target) * 2.0, len(target) + 120):
+                break
+        spans.append((cursor, best_end))
+        cursor = min(best_end + 1, len(segments) - 1)
+
+    boundaries = [0.0]
+    for span_index, (_, end_index) in enumerate(spans[:-1]):
+        current_end = float(segments[end_index]["end"])
+        next_index = min(end_index + 1, len(segments) - 1)
+        next_start = float(segments[next_index]["start"])
+        boundary = (current_end + next_start) / 2.0 if next_start >= current_end else current_end
+        boundary = max(boundaries[-1] + 0.05, min(boundary, total_duration))
+        boundaries.append(boundary)
+    boundaries.append(total_duration)
+
+    durations: list[float] = []
+    for index, shot in enumerate(shots):
+        start = min(boundaries[index], total_duration)
+        end = min(max(boundaries[index + 1], start + 0.05), total_duration)
+        duration = max(0.05, end - start)
+        shot["narration_start"] = round(start, 3)
+        shot["narration_end"] = round(end, 3)
+        shot["duration"] = round(duration, 3)
+        shot["timing_source"] = "whisper"
+        durations.append(duration)
+        if isinstance(shot.get("selected"), dict):
+            set_source_in(shot, float(shot["selected"].get("source_in") or 0.0))
+
+    save_project(project)
+    return [round(value, 3) for value in durations]
+
+
+def precise_sync_shots_to_narration(project: dict[str, Any]) -> list[float]:
+    audio = project.get("narration_audio") if isinstance(project.get("narration_audio"), dict) else {}
+    audio_path = Path(str(audio.get("path") or ""))
+    total_duration = float(audio.get("duration") or 0.0)
+    if not audio_path.exists() or total_duration <= 0:
+        return []
+    timing_dir = project_dir(str(project["id"])) / "audio"
+    timing_dir.mkdir(parents=True, exist_ok=True)
+    srt_path = timing_dir / "narration-timing.srt"
+    result = subtitle.create(
+        str(audio_path),
+        str(srt_path),
+        word_level=False,
+        log_details=False,
+    )
+    if result in (None, "") and not srt_path.exists():
+        return []
+    segments = _subtitle_segments_from_srt(srt_path)
+    return apply_transcript_timing(project, segments, total_duration)
 
 
 def split_script(script: str, max_chars: int = 420) -> list[str]:
