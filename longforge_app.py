@@ -236,7 +236,7 @@ with script_tab:
             key="lf_narration_audio",
             help="LongForge reads the real audio duration and can fit the shot plan to it.",
         )
-        audio_col, sync_col = st.columns(2)
+        audio_col, sync_col, precise_col = st.columns(3)
         with audio_col:
             if audio_upload is not None and st.button(
                 "Use this narration", use_container_width=True
@@ -253,14 +253,31 @@ with script_tab:
                     st.error(f"Could not read narration: {exc}")
         with sync_col:
             if st.button(
-                "Sync shots to narration",
+                "Quick sync",
                 use_container_width=True,
                 disabled=not bool(narration_audio) or not bool(project.get("shots")),
+                help="Fast proportional timing using the real narration duration.",
             ):
                 durations = lf.sync_shot_durations_to_narration(project)
                 if durations:
                     st.toast("Shot timings aligned to narration")
                     st.rerun()
+        with precise_col:
+            if st.button(
+                "Precise local timing",
+                use_container_width=True,
+                disabled=not bool(narration_audio) or not bool(project.get("shots")),
+                help="Uses local faster-whisper to follow real speech and pauses. No API charge.",
+            ):
+                with st.spinner("Analyzing narration locally with Whisper…"):
+                    durations = lf.precise_sync_shots_to_narration(project)
+                if durations:
+                    st.toast("Precise narration timing applied")
+                    st.rerun()
+                else:
+                    st.warning(
+                        "Precise timing was unavailable. Quick sync is still usable."
+                    )
     with right:
         st.subheader("What this version does")
         st.markdown(
