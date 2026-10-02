@@ -11,8 +11,10 @@ from typing import Any
 from uuid import uuid4
 from xml.etree import ElementTree as ET
 
+from moviepy import AudioFileClip, VideoFileClip
+
 from app.models.schema import MaterialInfo, VideoAspect
-from app.services import material
+from app.services import material, twelvelabs
 
 PROJECT_SCHEMA = "longforge.documentary-workbench"
 PROJECT_VERSION = 1
@@ -75,6 +77,8 @@ def new_project(title: str = "Untitled documentary", subject: str = "") -> dict[
         "fps": 25,
         "aspect": VideoAspect.landscape.value,
         "youtube_safe_mode": True,
+        "ai_query_expansion": True,
+        "narration_audio": None,
         "created_at": now,
         "updated_at": now,
         "shots": [],
@@ -102,6 +106,84 @@ def load_project(project_id: str) -> dict[str, Any]:
     if data.get("schema") != PROJECT_SCHEMA:
         raise ValueError("Not a LongForge documentary-workbench project")
     return data
+
+
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+
+
+def probe_audio_duration(path: str | Path) -> float:
+    clip = AudioFileClip(str(path))
+    try:
+        return max(0.0, float(clip.duration or 0.0))
+    finally:
+        clip.close()
+
+
+def probe_video_duration(path: str | Path) -> float:
+    clip = VideoFileClip(str(path), audio=False)
+    try:
+        return max(0.0, float(clip.duration or 0.0))
+    finally:
+        clip.close()
+
+
+def save_narration_audio(
+    project: dict[str, Any], filename: str, payload: bytes
+) -> dict[str, Any]:
+    suffix = Path(filename or "narration.mp3").suffix.lower()
+    if suffix not in AUDIO_EXTENSIONS:
+        raise ValueError("Unsupported narration audio type")
+    audio_dir = project_dir(str(project["id"])) / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    target = audio_dir / f"narration-{uuid4().hex[:8]}{suffix}"
+    target.write_bytes(payload)
+    duration = probe_audio_duration(target)
+    if duration <= 0:
+        target.unlink(missing_ok=True)
+        raise ValueError("Could not read narration audio duration")
+    project["narration_audio"] = {
+        "filename": filename,
+        "path": str(target.resolve()),
+        "duration": round(duration, 3),
+        "uploaded_at": utc_now(),
+    }
+    save_project(project)
+    return project["narration_audio"]
+
+
+def sync_shot_durations_to_narration(
+    project: dict[str, Any], minimum_shot_duration: float = 2.0
+) -> list[float]:
+    shots = project.get("shots") or []
+    audio = project.get("narration_audio") if isinstance(project.get("narration_audio"), dict) else {}
+    total = float(audio.get("duration") or 0.0)
+    if not shots or total <= 0:
+        return []
+
+    floor = min(max(float(minimum_shot_duration), 0.25), total / len(shots))
+    remaining = max(0.0, total - floor * len(shots))
+    weights = []
+    for shot in shots:
+        narration = re.sub(r"\s+", " ", str(shot.get("narration") or "")).strip()
+        weights.append(max(1.0, float(len(narration))))
+    total_weight = sum(weights) or float(len(shots))
+
+    durations = [floor + remaining * (weight / total_weight) for weight in weights]
+    if durations:
+        durations[-1] += total - sum(durations)
+
+    cursor = 0.0
+    for shot, duration in zip(shots, durations):
+        duration = max(0.25, float(duration))
+        shot["duration"] = round(duration, 3)
+        shot["narration_start"] = round(cursor, 3)
+        cursor += duration
+        shot["narration_end"] = round(cursor, 3)
+        if isinstance(shot.get("selected"), dict):
+            set_source_in(shot, float(shot["selected"].get("source_in") or 0.0))
+    save_project(project)
+    return [round(value, 3) for value in durations]
 
 
 def split_script(script: str, max_chars: int = 420) -> list[str]:
@@ -379,6 +461,80 @@ def build_copyright_csv(project: dict[str, Any]) -> str:
     return buffer.getvalue()
 
 
+def _fallback_search_waves(subject: str, query: str, narration: str) -> list[str]:
+    subject = re.sub(r"\s+", " ", str(subject or "")).strip()
+    query = re.sub(r"\s+", " ", str(query or "")).strip()
+    narration = re.sub(r"\s+", " ", str(narration or "")).strip()
+    waves: list[str] = []
+
+    def add(value: str) -> None:
+        value = re.sub(r"\s+", " ", value).strip()
+        if value and value.lower() not in {item.lower() for item in waves}:
+            waves.append(value[:220])
+
+    add(query)
+    add(" ".join(part for part in (subject, query) if part))
+
+    years = re.findall(r"\b(?:18|19|20)\d{2}\b", narration)
+    capitalized = re.findall(r"\b[A-ZА-ЯІЇЄҐ][\w'’.-]{3,}\b", narration)
+    context_tokens = list(dict.fromkeys(years + capitalized))[:8]
+    if context_tokens:
+        add(" ".join(part for part in (subject, " ".join(context_tokens), query) if part))
+
+    narration_words = [
+        word
+        for word in re.findall(r"[\w'’.-]+", narration)
+        if len(word) >= 5
+    ]
+    if narration_words:
+        add(" ".join(part for part in (subject, " ".join(narration_words[:10])) if part))
+    return waves[:4]
+
+
+def _ai_search_waves(subject: str, query: str, narration: str) -> list[str]:
+    try:
+        from app.services import llm
+
+        prompt = (
+            "Create exactly 4 concise ENGLISH media-search queries for a documentary shot. "
+            "The queries must be visibly different: (1) exact event/person/object, "
+            "(2) archival/historical wording, (3) broader contextual B-roll, "
+            "(4) documents/maps/science imagery when relevant. Return ONLY a JSON array "
+            "of four strings, no markdown.\n"
+            f"Topic: {subject}\nShot query: {query}\nNarration: {narration[:900]}"
+        )
+        raw = llm._generate_response(prompt)
+        match = re.search(r"\[[\s\S]*?\]", str(raw))
+        if not match:
+            return []
+        parsed = json.loads(match.group(0))
+        if not isinstance(parsed, list):
+            return []
+        return [
+            re.sub(r"\s+", " ", str(item)).strip()[:220]
+            for item in parsed
+            if str(item).strip()
+        ][:4]
+    except Exception:
+        return []
+
+
+def build_search_waves(
+    subject: str,
+    query: str,
+    narration: str = "",
+    use_ai: bool = True,
+) -> list[str]:
+    ai_waves = _ai_search_waves(subject, query, narration) if use_ai else []
+    fallback = _fallback_search_waves(subject, query, narration)
+    waves: list[str] = []
+    for item in [query, *ai_waves, *fallback]:
+        normalized = re.sub(r"\s+", " ", str(item or "")).strip()
+        if normalized and normalized.lower() not in {w.lower() for w in waves}:
+            waves.append(normalized[:220])
+    return waves[:4]
+
+
 def search_candidates(
     *,
     subject: str,
@@ -386,18 +542,49 @@ def search_candidates(
     duration: float,
     aspect: str = VideoAspect.landscape.value,
     limit: int = 18,
+    narration: str = "",
+    use_ai_query_expansion: bool = True,
 ) -> list[dict[str, Any]]:
     minimum_duration = max(2, int(math.ceil(float(duration or 5))))
-    items = material.search_media_scout(
-        search_term=query.strip(),
-        minimum_duration=minimum_duration,
-        video_aspect=VideoAspect(aspect),
-        video_subject=subject.strip(),
+    waves = build_search_waves(
+        subject=subject,
+        query=query,
+        narration=narration,
+        use_ai=use_ai_query_expansion,
     )
-    return [
-        annotate_youtube_safety(material_to_dict(item))
-        for item in items[: max(1, int(limit))]
-    ]
+    if not waves:
+        return []
+
+    per_wave = max(4, int(math.ceil(max(1, int(limit)) / len(waves))))
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for wave_index, wave_query in enumerate(waves, start=1):
+        items = material.search_media_scout(
+            search_term=wave_query,
+            minimum_duration=minimum_duration,
+            video_aspect=VideoAspect(aspect),
+            video_subject=subject.strip(),
+        )
+        added_this_wave = 0
+        for item in items:
+            candidate = annotate_youtube_safety(material_to_dict(item))
+            info = candidate.get("source_info") if isinstance(candidate.get("source_info"), dict) else {}
+            asset_id = str(info.get("asset_id") or candidate.get("url") or "")
+            key = (str(candidate.get("provider") or ""), asset_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            info = dict(info)
+            info["search_wave"] = wave_index
+            info["wave_query"] = wave_query
+            candidate["source_info"] = info
+            merged.append(candidate)
+            added_this_wave += 1
+            if added_this_wave >= per_wave or len(merged) >= limit:
+                break
+        if len(merged) >= limit:
+            break
+    return merged[:limit]
 
 
 def _copy_into_assets(source_path: Path, target_dir: Path, stem: str) -> Path:
@@ -435,6 +622,7 @@ def select_candidate(
     selected = dict(candidate)
     selected["local_path"] = str(local_path)
     selected["selected_at"] = utc_now()
+    selected["source_in"] = 0.0
     selected["youtube_safety"] = youtube_safety(selected)
     shot["selected"] = selected
     save_project(project)
@@ -454,19 +642,24 @@ def save_uploaded_asset(
     assets_dir.mkdir(parents=True, exist_ok=True)
     target = assets_dir / f"shot-{int(shot.get('order') or 0):03d}-{uuid4().hex[:8]}{suffix}"
     target.write_bytes(payload)
+    media_type = "image" if suffix in {".jpg", ".jpeg", ".png"} else "video"
+    actual_duration = (
+        probe_video_duration(target) if media_type == "video" else float(shot.get("duration") or 5)
+    )
     selected = {
         "provider": "local",
         "url": "",
-        "duration": float(shot.get("duration") or 5),
+        "duration": actual_duration,
         "source_info": {
             "provider": "local",
             "title": filename,
-            "media_type": "image" if suffix in {".jpg", ".jpeg", ".png"} else "video",
+            "media_type": media_type,
             "usage_status": "user-provided",
         },
         "local_path": str(target.resolve()),
         "selected_at": utc_now(),
         "rights_confirmed": False,
+        "source_in": 0.0,
     }
     selected["youtube_safety"] = youtube_safety(selected)
     shot["selected"] = selected
@@ -476,6 +669,74 @@ def save_uploaded_asset(
 
 def selected_shots(project: dict[str, Any]) -> list[dict[str, Any]]:
     return [shot for shot in project.get("shots") or [] if isinstance(shot.get("selected"), dict)]
+
+
+def set_source_in(shot: dict[str, Any], source_in: float) -> dict[str, Any] | None:
+    selected = shot.get("selected") if isinstance(shot.get("selected"), dict) else None
+    if not selected:
+        return None
+    info = selected.get("source_info") if isinstance(selected.get("source_info"), dict) else {}
+    if str(info.get("media_type") or "video").lower() == "image":
+        selected["source_in"] = 0.0
+        selected["source_out"] = float(shot.get("duration") or 5)
+        return selected
+
+    try:
+        start = max(0.0, float(source_in or 0.0))
+    except (TypeError, ValueError):
+        start = 0.0
+    desired = max(0.25, float(shot.get("duration") or 5.0))
+    try:
+        source_duration = max(0.0, float(selected.get("duration") or 0.0))
+    except (TypeError, ValueError):
+        source_duration = 0.0
+    if source_duration > 0:
+        start = min(start, max(0.0, source_duration - min(desired, source_duration)))
+        end = min(source_duration, start + desired)
+        if end - start < desired and source_duration >= desired:
+            start = max(0.0, source_duration - desired)
+            end = source_duration
+    else:
+        end = start + desired
+    selected["source_in"] = round(start, 3)
+    selected["source_out"] = round(end, 3)
+    return selected
+
+
+def suggest_smart_trim(shot: dict[str, Any]) -> dict[str, Any] | None:
+    selected = shot.get("selected") if isinstance(shot.get("selected"), dict) else None
+    if not selected:
+        return None
+    info = selected.get("source_info") if isinstance(selected.get("source_info"), dict) else {}
+    if str(info.get("media_type") or "video").lower() != "video":
+        return None
+    url = str(selected.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return None
+    query = " ".join(
+        part.strip()
+        for part in (
+            str(shot.get("query") or ""),
+            str(shot.get("notes") or ""),
+            str(shot.get("narration") or ""),
+        )
+        if part.strip()
+    )[:1200]
+    suggestion = twelvelabs.suggest_clip_window(
+        video_url=url,
+        query=query,
+        target_duration=float(shot.get("duration") or 7.0),
+        source_duration=float(selected.get("duration") or 0.0) or None,
+    )
+    if not suggestion:
+        return None
+    set_source_in(shot, float(suggestion["start"]))
+    selected["smart_trim_reason"] = suggestion.get("reason", "")
+    return {
+        "start": selected.get("source_in", 0.0),
+        "end": selected.get("source_out"),
+        "reason": selected.get("smart_trim_reason", ""),
+    }
 
 
 def _seconds_fraction(seconds: float, fps: int) -> str:
