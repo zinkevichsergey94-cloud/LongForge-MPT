@@ -1994,8 +1994,12 @@ def search_media_scout(
             search_term=search_term,
             candidates=vision_payload,
         )
-        if order:
+        if order is not None:
             merged = [merged[index] for index in order if 0 <= index < len(merged)]
+            logger.info(
+                f"media scout vision hard filter: term={search_term!r}, "
+                f"approved={len(merged)}"
+            )
     except Exception as exc:
         logger.warning(
             "media scout vision verification unavailable; "
