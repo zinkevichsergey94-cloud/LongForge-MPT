@@ -1,4 +1,5 @@
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -286,3 +287,105 @@ def test_fcpxml_embeds_narration_dialogue_and_mutes_broll_by_default(
     assert 'lane="-1"' in xml
     assert 'audioRole="dialogue"' in xml
     assert xml.count('hasAudio="1"') == 1
+
+
+
+def _parse_fcpxml(xml_text: str):
+    body = "<fcpxml" + xml_text.split("<fcpxml", 1)[1]
+    return ET.fromstring(body)
+
+
+def test_fcpxml_embeds_narration_as_dialogue_and_mutes_broll_by_default(tmp_path):
+    narration = tmp_path / "voice.wav"
+    narration.write_bytes(b"voice")
+    video = tmp_path / "broll.mp4"
+    video.write_bytes(b"video")
+
+    project = lf.new_project("Narration Track Test")
+    project["youtube_safe_mode"] = False
+    project["fps"] = 25
+    project["narration_audio"] = {
+        "filename": "voice.wav",
+        "path": str(narration),
+        "duration": 10.0,
+    }
+    project["shots"] = [
+        {
+            "id": "shot-1",
+            "order": 1,
+            "narration": "Documentary narration.",
+            "narration_start": 2.0,
+            "narration_end": 7.0,
+            "query": "archive",
+            "duration": 5.0,
+            "notes": "",
+            "candidates": [],
+            "selected": {
+                "provider": "pexels",
+                "duration": 20.0,
+                "local_path": str(video),
+                "source_in": 3.0,
+                "source_info": {
+                    "provider": "pexels",
+                    "media_type": "video",
+                    "usage_status": "auto",
+                    "license": "Pexels License",
+                },
+            },
+        }
+    ]
+
+    root = _parse_fcpxml(lf.build_fcpxml(project))
+    assets = root.find("resources").findall("asset")
+    narration_asset = next(asset for asset in assets if asset.get("name") == "voice.wav")
+    broll_asset = next(asset for asset in assets if asset.get("name") == "broll.mp4")
+
+    assert narration_asset.get("hasAudio") == "1"
+    assert broll_asset.get("hasAudio") is None
+
+    narration_clip = root.find(".//asset-clip[@name='Narration']")
+    assert narration_clip is not None
+    assert narration_clip.get("audioRole") == "dialogue"
+    assert narration_clip.get("lane") == "-1"
+    assert narration_clip.get("start") == "50/25s"
+    assert narration_clip.get("duration") == "125/25s"
+
+
+def test_fcpxml_can_keep_original_broll_audio(tmp_path):
+    video = tmp_path / "archive.mp4"
+    video.write_bytes(b"video")
+
+    project = lf.new_project("Source Audio Test")
+    project["youtube_safe_mode"] = False
+    project["shots"] = [
+        {
+            "id": "shot-1",
+            "order": 1,
+            "narration": "Narration.",
+            "query": "archive",
+            "duration": 5.0,
+            "notes": "",
+            "candidates": [],
+            "selected": {
+                "provider": "pexels",
+                "duration": 12.0,
+                "local_path": str(video),
+                "keep_source_audio": True,
+                "source_info": {
+                    "provider": "pexels",
+                    "media_type": "video",
+                    "usage_status": "auto",
+                    "license": "Pexels License",
+                },
+            },
+        }
+    ]
+
+    root = _parse_fcpxml(lf.build_fcpxml(project))
+    asset = next(
+        asset
+        for asset in root.find("resources").findall("asset")
+        if asset.get("name") == "archive.mp4"
+    )
+
+    assert asset.get("hasAudio") == "1"
