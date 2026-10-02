@@ -331,6 +331,14 @@ with script_tab:
                         value=str(shot.get("notes") or ""),
                         key=f"notes_{shot['id']}",
                     )
+                timing_start = shot.get("narration_start")
+                timing_end = shot.get("narration_end")
+                if timing_start is not None and timing_end is not None:
+                    timing_source = str(shot.get("timing_source") or "quick")
+                    st.caption(
+                        f"Narration timing: {float(timing_start):.2f}s → "
+                        f"{float(timing_end):.2f}s · {timing_source}"
+                    )
                 if picked:
                     selected = shot["selected"]
                     st.caption(
@@ -604,6 +612,19 @@ with timeline_tab:
                             st.caption("Smart Trim optional · TwelveLabs key not configured")
                     if selected.get("smart_trim_reason"):
                         st.caption(f"Smart Trim reason: {selected['smart_trim_reason']}")
+                    keep_source_audio = st.checkbox(
+                        "Keep original source audio in DaVinci",
+                        value=bool(selected.get("keep_source_audio", False)),
+                        key=f"keep_source_audio_{shot['id']}",
+                        help=(
+                            "Off by default so B-roll does not compete with narration. "
+                            "Enable only when the original archive sound is useful."
+                        ),
+                    )
+                    if keep_source_audio != bool(selected.get("keep_source_audio", False)):
+                        selected["keep_source_audio"] = keep_source_audio
+                        persist()
+                        st.rerun()
 
             if selected and assessment:
                 if assessment["status"] == lf.YOUTUBE_SAFE:
