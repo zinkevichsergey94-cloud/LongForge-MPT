@@ -985,6 +985,155 @@ Use English for all search queries.
 
 
 
+
+def generate_scene_plan(
+    video_subject: str,
+    video_script: str,
+    max_scenes: int = 8,
+    app_config=None,
+) -> list[dict]:
+    """
+    Convert narration into an explicit documentary scene plan.
+
+    The planner is deliberately stricter than keyword generation: each scene
+    carries a visual goal, 2-4 concrete search queries, a source-priority list,
+    and whether generic stock is allowed at all.
+    """
+    video_subject = str(video_subject or "").strip()
+    video_script = utils.remove_pause_tags(video_script or "").strip()
+    if not video_script:
+        return []
+
+    try:
+        max_scenes = max(1, min(int(max_scenes), 12))
+    except (TypeError, ValueError):
+        max_scenes = 8
+
+    prompt = f"""
+# Role
+Documentary Scene Planner
+
+# Goal
+Break the narration into no more than {max_scenes} chronological visual scenes.
+Each scene must say exactly what should be shown on screen and where it should
+be searched.
+
+# Output
+Return ONLY a valid JSON array. Every item must contain exactly:
+- "scene": integer starting at 1
+- "narration": the matching narration excerpt
+- "visual_goal": one concrete description of what the viewer should literally see
+- "queries": array of 2 to 4 English search queries
+- "source_priority": array using only these values:
+  "wikimedia", "openverse", "internet_archive", "stock"
+- "allow_stock": boolean
+
+# Rules
+1. Preserve narration order.
+2. Preserve exact named entities when the script names a disease, clinical sign,
+   gene, protein, therapy, person, place, historical event, document, device,
+   molecule, organization, product or other specific real-world subject.
+3. For a specific named subject, prefer documentary/archive/scientific material.
+   Put "wikimedia", "openverse" and/or "internet_archive" before "stock".
+4. Set "allow_stock" to false when generic stock could falsely imply that a random
+   person, patient, event, place or object is the exact named subject.
+5. Set "allow_stock" to true for genuinely generic B-roll such as scientists in a
+   laboratory, manufacturing, meetings, city traffic, shipping, machinery, etc.
+6. Do not use scenery, sunsets, silhouettes, flags, money, crypto, random streets,
+   decorative DNA animation or unrelated laboratories unless the narration
+   actually calls for that exact visual.
+7. Queries must describe visible material. Use exact terms where useful, e.g.
+   "Gowers sign Duchenne child rising floor",
+   "Duchenne muscular dystrophy muscle histology",
+   "DMD gene dystrophin diagram",
+   "gene therapy viral vector laboratory".
+8. One scene may use a still image, diagram, archival video or stock video.
+9. Do not invent facts not present in the narration.
+
+# Video Subject
+{video_subject}
+
+# Narration
+{video_script}
+""".strip()
+
+    response = ""
+    for attempt in range(_max_retries):
+        try:
+            response = (
+                _generate_response(prompt)
+                if app_config is None
+                else _generate_response(prompt, app_config=app_config)
+            )
+            if response.startswith("Error: "):
+                return []
+            payload = json.loads(_strip_code_fence(response))
+            if not isinstance(payload, list):
+                raise ValueError("scene plan is not a JSON array")
+
+            normalized = []
+            for index, raw_scene in enumerate(payload[:max_scenes], start=1):
+                if not isinstance(raw_scene, dict):
+                    continue
+                narration = str(raw_scene.get("narration") or "").strip()
+                visual_goal = str(raw_scene.get("visual_goal") or "").strip()
+                raw_queries = raw_scene.get("queries")
+                queries = [
+                    str(query).strip()
+                    for query in raw_queries
+                    if isinstance(query, str) and str(query).strip()
+                ] if isinstance(raw_queries, list) else []
+                raw_priority = raw_scene.get("source_priority")
+                allowed_sources = {
+                    "wikimedia",
+                    "openverse",
+                    "internet_archive",
+                    "stock",
+                }
+                source_priority = [
+                    str(source).strip()
+                    for source in raw_priority
+                    if isinstance(source, str)
+                    and str(source).strip() in allowed_sources
+                ] if isinstance(raw_priority, list) else []
+
+                if not narration or not visual_goal or not queries:
+                    continue
+                if not source_priority:
+                    source_priority = [
+                        "wikimedia",
+                        "openverse",
+                        "internet_archive",
+                        "stock",
+                    ]
+                normalized.append(
+                    {
+                        "scene": index,
+                        "narration": narration,
+                        "visual_goal": visual_goal,
+                        "queries": queries[:4],
+                        "source_priority": source_priority,
+                        "allow_stock": bool(raw_scene.get("allow_stock", True)),
+                    }
+                )
+
+            if normalized:
+                logger.success(
+                    f"documentary scene plan generated: scenes={len(normalized)}"
+                )
+                return normalized
+        except Exception as exc:
+            logger.warning(
+                f"failed to generate documentary scene plan: {type(exc).__name__}: {exc}"
+            )
+        if attempt < _max_retries - 1:
+            logger.warning(
+                f"failed to generate scene plan, trying again... {attempt + 1}"
+            )
+
+    return []
+
+
 def rank_visual_candidates_with_vision(
     *,
     video_subject: str,
