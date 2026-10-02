@@ -208,6 +208,7 @@ def youtube_safety(media: dict[str, Any]) -> dict[str, Any]:
     license_name = str(info.get("license") or "").strip()
     license_url = str(info.get("license_url") or "").strip()
     license_text = f"{license_name} {license_url}".lower()
+    rights_note = str(info.get("rights_note") or "").strip()
     rights_confirmed = bool(media.get("rights_confirmed"))
 
     def result(status: str, reason: str, *, attribution: bool = False) -> dict[str, Any]:
@@ -216,6 +217,7 @@ def youtube_safety(media: dict[str, Any]) -> dict[str, Any]:
             "reason": reason,
             "requires_attribution": attribution,
             "rights_confirmed": rights_confirmed,
+            "caveat": rights_note,
         }
 
     if rights_confirmed and provider == "local":
@@ -331,6 +333,7 @@ def copyright_rows(project: dict[str, Any]) -> list[dict[str, Any]]:
                 "reason": assessment["reason"],
                 "rights_confirmed": assessment["rights_confirmed"],
                 "requires_attribution": assessment["requires_attribution"],
+                "caveat": assessment["caveat"],
                 "provider": selected.get("provider") or info.get("provider") or "",
                 "title": info.get("title", ""),
                 "license": info.get("license", ""),
@@ -359,6 +362,7 @@ def build_copyright_csv(project: dict[str, Any]) -> str:
         "reason",
         "rights_confirmed",
         "requires_attribution",
+        "caveat",
         "provider",
         "title",
         "license",
@@ -579,6 +583,7 @@ def attribution_rows(project: dict[str, Any]) -> list[dict[str, Any]]:
                 "usage_status": info.get("usage_status", ""),
                 "youtube_status": youtube_safety(selected)["status"],
                 "youtube_reason": youtube_safety(selected)["reason"],
+                "rights_note": youtube_safety(selected)["caveat"],
                 "rights_confirmed": youtube_safety(selected)["rights_confirmed"],
                 "local_file": Path(str(selected.get("local_path") or "")).name,
                 "query": shot.get("query", ""),
@@ -600,6 +605,7 @@ def build_attribution_csv(project: dict[str, Any]) -> str:
         "usage_status",
         "youtube_status",
         "youtube_reason",
+        "rights_note",
         "rights_confirmed",
         "local_file",
         "query",
