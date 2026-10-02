@@ -778,12 +778,20 @@ def build_fcpxml(project: dict[str, Any]) -> str:
         duration = float(shot.get("duration") or 5)
         info = selected.get("source_info") if isinstance(selected.get("source_info"), dict) else {}
         media_type = str(info.get("media_type") or "video")
+        try:
+            source_duration = max(
+                duration,
+                float(selected.get("duration") or 0.0),
+                float(selected.get("source_out") or 0.0),
+            )
+        except (TypeError, ValueError):
+            source_duration = duration
         attrs = {
             "id": asset_id,
             "name": Path(local_path).name,
             "src": _path_to_file_uri(local_path),
             "start": "0s",
-            "duration": _seconds_fraction(duration, fps),
+            "duration": _seconds_fraction(source_duration, fps),
             "hasVideo": "1",
             "format": format_id,
         }
@@ -807,13 +815,18 @@ def build_fcpxml(project: dict[str, Any]) -> str:
     offset_seconds = 0.0
     for shot, asset_id in asset_refs:
         duration = float(shot.get("duration") or 5)
+        selected = shot["selected"]
+        try:
+            source_in = max(0.0, float(selected.get("source_in") or 0.0))
+        except (TypeError, ValueError):
+            source_in = 0.0
         clip = ET.SubElement(
             spine,
             "asset-clip",
             name=f"{int(shot.get('order') or 0):03d} {Path(str(shot['selected'].get('local_path') or '')).name}",
             ref=asset_id,
             offset=_seconds_fraction(offset_seconds, fps) if offset_seconds > 0 else "0s",
-            start="0s",
+            start=_seconds_fraction(source_in, fps) if source_in > 0 else "0s",
             duration=_seconds_fraction(duration, fps),
         )
         narration = str(shot.get("narration") or "").strip()
@@ -908,6 +921,7 @@ def export_project(project: dict[str, Any]) -> dict[str, Path]:
                 "project": project.get("title"),
                 "fps": project.get("fps"),
                 "aspect": project.get("aspect"),
+                "narration_audio": project.get("narration_audio"),
                 "shots": [
                     {
                         "order": shot.get("order"),
