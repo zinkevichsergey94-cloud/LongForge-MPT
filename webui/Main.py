@@ -5039,6 +5039,115 @@ def _render_script_settings(panel, params):
                 height=180,
                 key="video_script",
             )
+
+            # LongForge documentary workflow: plan scenes first, then inspect which
+            # providers actually return usable material before rendering anything.
+            if st.button(
+                "Побудувати план сцен",
+                key="build_media_scout_scene_plan",
+                use_container_width=True,
+                type="secondary",
+                icon=":material/movie_edit:",
+            ):
+                if not params.video_script:
+                    st.warning("Спочатку встав сценарій.")
+                else:
+                    with st.spinner("Розбиваю сценарій на документальні сцени..."):
+                        scene_plan = _run_llm_read_operation(
+                            "generate_scene_plan",
+                            lambda app_config_snapshot: llm.generate_scene_plan(
+                                video_subject=params.video_subject,
+                                video_script=params.video_script,
+                                max_scenes=8,
+                                app_config=app_config_snapshot,
+                            ),
+                        )
+                    st.session_state["media_scout_scene_plan"] = scene_plan or []
+                    st.session_state["media_scout_search_audit"] = []
+
+            scene_plan = st.session_state.get("media_scout_scene_plan", [])
+            if isinstance(scene_plan, list) and scene_plan:
+                with st.expander("План сцен Media Scout", expanded=True):
+                    for scene in scene_plan:
+                        scene_number = scene.get("scene", "?")
+                        st.markdown(
+                            f"**Сцена {scene_number}** — "
+                            f"{scene.get('visual_goal', '')}"
+                        )
+                        narration = str(scene.get("narration") or "").strip()
+                        if narration:
+                            st.caption(narration)
+                        priority = " → ".join(scene.get("source_priority") or [])
+                        stock_policy = (
+                            "stock дозволений"
+                            if bool(scene.get("allow_stock", True))
+                            else "stock заборонений"
+                        )
+                        st.caption(
+                            f"Джерела: {priority or 'auto'} · {stock_policy}"
+                        )
+                        queries = scene.get("queries") or []
+                        if queries:
+                            st.code("\n".join(str(query) for query in queries))
+                        st.divider()
+
+                if st.button(
+                    "Перевірити, де Media Scout реально знаходить матеріал",
+                    key="audit_media_scout_scene_plan",
+                    use_container_width=True,
+                    type="secondary",
+                    icon=":material/search:",
+                ):
+                    audits = []
+                    with st.spinner(
+                        "Перевіряю Wikimedia, Openverse, Internet Archive і стоки..."
+                    ):
+                        for scene in scene_plan[:8]:
+                            audits.append(
+                                material.audit_media_scout_scene(
+                                    video_subject=params.video_subject,
+                                    scene=scene,
+                                    video_aspect=VideoAspect.landscape,
+                                    minimum_duration=3,
+                                )
+                            )
+                    st.session_state["media_scout_search_audit"] = audits
+
+                audits = st.session_state.get("media_scout_search_audit", [])
+                if isinstance(audits, list) and audits:
+                    with st.expander("Search Audit", expanded=True):
+                        for audit in audits:
+                            scene_number = audit.get("scene", "?")
+                            st.markdown(
+                                f"**Сцена {scene_number}: "
+                                f"{audit.get('visual_goal', '')}**"
+                            )
+                            counts = audit.get("provider_counts") or {}
+                            if counts:
+                                count_text = " · ".join(
+                                    f"{provider}: {count}"
+                                    for provider, count in sorted(counts.items())
+                                )
+                                st.write(count_text)
+                            else:
+                                st.warning(
+                                    "Немає придатних результатів у підключених джерелах."
+                                )
+
+                            top_results = audit.get("top_results") or []
+                            for result in top_results[:4]:
+                                title = result.get("title") or "(без назви)"
+                                provider = result.get("provider") or "unknown"
+                                license_name = result.get("license") or ""
+                                source_page = result.get("source_page") or ""
+                                line = f"• **{provider}** — {title}"
+                                if license_name:
+                                    line += f" · {license_name}"
+                                st.markdown(line)
+                                if source_page:
+                                    st.caption(source_page)
+                            st.divider()
+
             if _effective_script_generation_backend() == "loomloom":
                 st.caption(tr("LoomLoom Video Terms Reuse Help"))
             elif st.button(
