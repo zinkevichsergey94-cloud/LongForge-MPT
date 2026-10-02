@@ -342,10 +342,17 @@ def test_fcpxml_embeds_narration_as_dialogue_and_mutes_broll_by_default(tmp_path
 
     assert narration_asset.get("hasAudio") == "1"
     assert broll_asset.get("hasAudio") is None
+    assert narration_asset.find("media-rep").get("kind") == "original-media"
+    assert narration_asset.find("media-rep").get("src").startswith("file:")
+    assert broll_asset.find("media-rep").get("src").startswith("file:")
+
+    broll_clip = root.find(".//spine/asset-clip")
+    assert broll_clip.get("srcEnable") == "video"
 
     narration_clip = root.find(".//asset-clip[@name='Narration']")
     assert narration_clip is not None
     assert narration_clip.get("audioRole") == "dialogue"
+    assert narration_clip.get("srcEnable") == "audio"
     assert narration_clip.get("lane") == "-1"
     assert narration_clip.get("start") == "50/25s"
     assert narration_clip.get("duration") == "125/25s"
@@ -389,3 +396,5 @@ def test_fcpxml_can_keep_original_broll_audio(tmp_path):
     )
 
     assert asset.get("hasAudio") == "1"
+    clip = root.find(".//spine/asset-clip")
+    assert clip.get("srcEnable") == "all"
