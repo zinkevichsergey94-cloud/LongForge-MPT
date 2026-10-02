@@ -909,6 +909,21 @@ def export_project(project: dict[str, Any]) -> dict[str, Path]:
     credits_path = export_dir / f"{base}-sources.csv"
     manifest_path = export_dir / f"{base}-timeline.json"
     copyright_path = export_dir / f"{base}-copyright-report.csv"
+    narration_export_path = None
+    narration_audio = (
+        project.get("narration_audio")
+        if isinstance(project.get("narration_audio"), dict)
+        else None
+    )
+    if narration_audio:
+        source_audio = Path(str(narration_audio.get("path") or ""))
+        if source_audio.exists() and source_audio.is_file():
+            narration_export_path = export_dir / (
+                f"{base}-narration{source_audio.suffix.lower() or '.wav'}"
+            )
+            if source_audio.resolve() != narration_export_path.resolve():
+                shutil.copy2(source_audio, narration_export_path)
+
     fcpxml_path.write_text(build_fcpxml(project), encoding="utf-8")
     credits_path.write_text(build_attribution_csv(project), encoding="utf-8-sig")
     copyright_path.write_text(build_copyright_csv(project), encoding="utf-8-sig")
@@ -937,9 +952,12 @@ def export_project(project: dict[str, Any]) -> dict[str, Path]:
         ),
         encoding="utf-8",
     )
-    return {
+    exported = {
         "fcpxml": fcpxml_path,
         "credits": credits_path,
         "manifest": manifest_path,
         "copyright": copyright_path,
     }
+    if narration_export_path is not None:
+        exported["narration"] = narration_export_path
+    return exported
