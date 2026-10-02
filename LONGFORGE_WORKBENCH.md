@@ -92,3 +92,17 @@ Besides the fast proportional sync, the workbench now has an opt-in Precise loca
 ## Narration in FCPXML
 
 When a final narration file is attached to the project, LongForge exports a copy of that audio and references it in FCPXML as dialogue slices aligned to the corresponding shot. B-roll source audio is excluded by default, so stock/archive clips do not unexpectedly add their own sound under the narration. Source video in-points are preserved separately.
+
+
+## Portable DaVinci package
+
+DaVinci export now builds a portable project package instead of referencing the workbench's internal asset folders directly:
+
+- selected visual media is copied into `export/media/`;
+- narration is copied into `export/audio/`;
+- FCPXML references the packaged copies;
+- the JSON manifest stores portable `package_path` values;
+- narration is embedded in the FCPXML as a dialogue source;
+- B-roll source audio is disabled by default and can be explicitly retained per shot.
+
+The FCPXML writer now follows the FCPXML 1.10 media representation model: assets contain `media-rep kind="original-media"` children instead of the pre-1.9 `asset src=...` form.
