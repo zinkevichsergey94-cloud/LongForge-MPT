@@ -910,15 +910,20 @@ def build_fcpxml(project: dict[str, Any]) -> str:
         if narration_path.exists() and narration_duration > 0:
             narration_ref = f"r{next_resource_id}"
             next_resource_id += 1
-            ET.SubElement(
+            narration_asset = ET.SubElement(
                 resources,
                 "asset",
                 id=narration_ref,
                 name=narration_path.name,
-                src=_path_to_file_uri(str(narration_path)),
                 start="0s",
                 duration=_seconds_fraction(narration_duration, fps),
                 hasAudio="1",
+            )
+            ET.SubElement(
+                narration_asset,
+                "media-rep",
+                kind="original-media",
+                src=_path_to_file_uri(str(narration_path)),
             )
 
     asset_refs: list[tuple[dict[str, Any], str]] = []
@@ -943,7 +948,6 @@ def build_fcpxml(project: dict[str, Any]) -> str:
         attrs = {
             "id": asset_id,
             "name": Path(local_path).name,
-            "src": _path_to_file_uri(local_path),
             "start": "0s",
             "duration": _seconds_fraction(source_duration, fps),
             "hasVideo": "1",
@@ -951,7 +955,13 @@ def build_fcpxml(project: dict[str, Any]) -> str:
         }
         if media_type != "image" and bool(selected.get("keep_source_audio", False)):
             attrs["hasAudio"] = "1"
-        ET.SubElement(resources, "asset", **attrs)
+        asset_node = ET.SubElement(resources, "asset", **attrs)
+        ET.SubElement(
+            asset_node,
+            "media-rep",
+            kind="original-media",
+            src=_path_to_file_uri(local_path),
+        )
         asset_refs.append((shot, asset_id))
 
     library = ET.SubElement(fcpxml, "library")
@@ -982,6 +992,11 @@ def build_fcpxml(project: dict[str, Any]) -> str:
             offset=_seconds_fraction(offset_seconds, fps) if offset_seconds > 0 else "0s",
             start=_seconds_fraction(source_in, fps) if source_in > 0 else "0s",
             duration=_seconds_fraction(duration, fps),
+            srcEnable=(
+                "all"
+                if bool(selected.get("keep_source_audio", False))
+                else "video"
+            ),
         )
         narration = str(shot.get("narration") or "").strip()
         if narration:
@@ -1008,6 +1023,7 @@ def build_fcpxml(project: dict[str, Any]) -> str:
                     else "0s"
                 ),
                 duration=_seconds_fraction(duration, fps),
+                srcEnable="audio",
                 audioRole="dialogue",
             )
         offset_seconds += duration
