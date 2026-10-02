@@ -140,6 +140,14 @@ with st.sidebar:
             "DO NOT USE or still requires manual rights review."
         ),
     )
+    project["ai_query_expansion"] = st.toggle(
+        "AI query expansion",
+        value=bool(project.get("ai_query_expansion", True)),
+        help=(
+            "When the configured LLM is available, create several different English "
+            "search phrases for each documentary shot. Falls back to local query variants."
+        ),
+    )
     if st.button("Save project", type="primary", use_container_width=True):
         persist()
         st.toast("Project saved")
@@ -213,6 +221,46 @@ with script_tab:
                 project["shots"] = generated
                 persist()
                 st.rerun()
+
+        st.divider()
+        st.subheader("Narration timing")
+        narration_audio = project.get("narration_audio") if isinstance(project.get("narration_audio"), dict) else None
+        if narration_audio:
+            st.success(
+                f"Narration loaded · {float(narration_audio.get('duration') or 0):.1f}s · "
+                f"{narration_audio.get('filename') or 'audio'}"
+            )
+        audio_upload = st.file_uploader(
+            "Upload final narration",
+            type=["mp3", "wav", "m4a", "aac", "flac", "ogg"],
+            key="lf_narration_audio",
+            help="LongForge reads the real audio duration and can fit the shot plan to it.",
+        )
+        audio_col, sync_col = st.columns(2)
+        with audio_col:
+            if audio_upload is not None and st.button(
+                "Use this narration", use_container_width=True
+            ):
+                try:
+                    lf.save_narration_audio(
+                        project,
+                        audio_upload.name,
+                        audio_upload.getvalue(),
+                    )
+                    st.toast("Narration timing loaded")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not read narration: {exc}")
+        with sync_col:
+            if st.button(
+                "Sync shots to narration",
+                use_container_width=True,
+                disabled=not bool(narration_audio) or not bool(project.get("shots")),
+            ):
+                durations = lf.sync_shot_durations_to_narration(project)
+                if durations:
+                    st.toast("Shot timings aligned to narration")
+                    st.rerun()
     with right:
         st.subheader("What this version does")
         st.markdown(
@@ -324,6 +372,8 @@ with scout_tab:
                                 or VideoAspect.landscape.value
                             ),
                             limit=18,
+                            narration=str(shot.get("narration") or ""),
+                            use_ai_query_expansion=bool(project.get("ai_query_expansion", True)),
                         )
                         persist()
                     except Exception as exc:
@@ -379,6 +429,10 @@ with scout_tab:
                             if isinstance(candidate.get("source_info"), dict)
                             else {}
                         )
+                        wave = info.get("search_wave")
+                        wave_query = str(info.get("wave_query") or "")
+                        if wave:
+                            st.caption(f"Search wave {wave}: {wave_query}")
                         source_page = str(info.get("source_page") or "")
                         if source_page.startswith("http"):
                             st.link_button(
@@ -481,6 +535,59 @@ with timeline_tab:
                 f'{str(shot.get("narration") or "")[:180]}</div>',
                 unsafe_allow_html=True,
             )
+            if selected:
+                media_type = str(info.get("media_type") or "video").lower()
+                if media_type == "video":
+                    try:
+                        source_duration = max(0.0, float(selected.get("duration") or 0.0))
+                    except (TypeError, ValueError):
+                        source_duration = 0.0
+                    shot_duration = max(0.25, float(shot.get("duration") or 5.0))
+                    max_start = max(0.0, source_duration - min(source_duration, shot_duration)) if source_duration > 0 else 36000.0
+                    current_start = max(0.0, float(selected.get("source_in") or 0.0))
+                    current_start = min(current_start, max_start)
+                    trim_a, trim_b, trim_c = st.columns([0.34, 0.33, 0.33])
+                    with trim_a:
+                        new_source_in = st.number_input(
+                            "Source in (s)",
+                            min_value=0.0,
+                            max_value=float(max_start),
+                            value=float(current_start),
+                            step=0.5,
+                            key=f"source_in_{shot['id']}",
+                        )
+                        if abs(new_source_in - current_start) > 0.0001:
+                            lf.set_source_in(shot, new_source_in)
+                            persist()
+                            st.rerun()
+                    with trim_b:
+                        derived = lf.set_source_in(shot, current_start) or selected
+                        st.metric(
+                            "Source out",
+                            f"{float(derived.get('source_out') or shot_duration):.1f}s",
+                        )
+                    with trim_c:
+                        if lf.twelvelabs.is_enabled() and str(selected.get("url") or "").startswith(("http://", "https://")):
+                            if st.button(
+                                "AI Smart Trim",
+                                key=f"smart_trim_{shot['id']}",
+                                use_container_width=True,
+                            ):
+                                with st.spinner("Finding the strongest moment inside the source…"):
+                                    suggestion = lf.suggest_smart_trim(shot)
+                                if suggestion:
+                                    persist()
+                                    st.toast(
+                                        f"Smart Trim: {suggestion['start']:.1f}s → {suggestion['end']:.1f}s"
+                                    )
+                                    st.rerun()
+                                else:
+                                    st.warning("No reliable smart-trim window was returned.")
+                        else:
+                            st.caption("Smart Trim optional · TwelveLabs key not configured")
+                    if selected.get("smart_trim_reason"):
+                        st.caption(f"Smart Trim reason: {selected['smart_trim_reason']}")
+
             if selected and assessment:
                 if assessment["status"] == lf.YOUTUBE_SAFE:
                     st.success(assessment["reason"])
