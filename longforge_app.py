@@ -699,12 +699,15 @@ with export_tab:
 
     exported = st.session_state.get("lf_last_export")
     if exported:
-        for key, label, mime in [
+        download_specs = [
             ("fcpxml", "Download FCPXML", "application/xml"),
             ("manifest", "Download timeline JSON", "application/json"),
             ("credits", "Download source/license CSV", "text/csv"),
             ("copyright", "Download copyright report CSV", "text/csv"),
-        ]:
+        ]
+        if "narration" in exported:
+            download_specs.insert(1, ("narration", "Download narration audio", "audio/mpeg"))
+        for key, label, mime in download_specs:
             path = Path(exported[key])
             if path.exists():
                 st.download_button(
