@@ -184,3 +184,52 @@ def test_source_in_is_clamped_and_exported_to_fcpxml(tmp_path, monkeypatch):
 
     assert 'start="375/25s"' in xml
     assert 'duration="125/25s"' in xml
+
+
+
+def test_apply_transcript_timing_uses_real_pause_boundaries(tmp_path, monkeypatch):
+    monkeypatch.setattr(lf, "PROJECTS_DIR", tmp_path / "projects")
+    project = lf.new_project("Precise Timing Test")
+    project["narration_audio"] = {
+        "filename": "voice.wav",
+        "path": str(tmp_path / "voice.wav"),
+        "duration": 8.0,
+    }
+    project["shots"] = [
+        {
+            "id": "a",
+            "order": 1,
+            "narration": "The first sentence ends here.",
+            "query": "first",
+            "duration": 4.0,
+            "notes": "",
+            "candidates": [],
+            "selected": None,
+        },
+        {
+            "id": "b",
+            "order": 2,
+            "narration": "The second sentence begins after a pause.",
+            "query": "second",
+            "duration": 4.0,
+            "notes": "",
+            "candidates": [],
+            "selected": None,
+        },
+    ]
+    segments = [
+        {"start": 0.4, "end": 2.8, "text": "The first sentence ends here."},
+        {
+            "start": 4.0,
+            "end": 7.2,
+            "text": "The second sentence begins after a pause.",
+        },
+    ]
+
+    durations = lf.apply_transcript_timing(project, segments, 8.0)
+
+    assert sum(durations) == pytest.approx(8.0, abs=0.01)
+    assert project["shots"][0]["narration_end"] == pytest.approx(3.4, abs=0.01)
+    assert project["shots"][1]["narration_start"] == pytest.approx(3.4, abs=0.01)
+    assert project["shots"][0]["timing_source"] == "whisper"
+    assert project["shots"][1]["timing_source"] == "whisper"
