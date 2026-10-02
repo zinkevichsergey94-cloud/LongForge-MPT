@@ -29,7 +29,9 @@ Config (config.toml, [app] section):
 Configure a TwelveLabs API key from the TwelveLabs dashboard (https://twelvelabs.io) to enable this optional integration.
 """
 
+import json
 import math
+import re
 from functools import lru_cache
 from typing import List, Optional
 
@@ -164,3 +166,72 @@ def analyze_clip(
     except Exception as e:  # noqa: BLE001
         logger.warning(f"TwelveLabs analyze_clip failed: {e}")
         return None
+
+
+def suggest_clip_window(
+    video_url: str,
+    query: str,
+    target_duration: float = 7.0,
+    source_duration: Optional[float] = None,
+) -> Optional[dict]:
+    """
+    Ask Pegasus for one useful continuous window inside a source video.
+
+    This is intentionally opt-in: without a configured TwelveLabs key the
+    function returns None and LongForge keeps the manual in/out workflow.
+    """
+    if not is_enabled() or not video_url or not query.strip():
+        return None
+
+    try:
+        target = max(2.0, float(target_duration or 7.0))
+    except (TypeError, ValueError):
+        target = 7.0
+
+    prompt = (
+        "Find the single best continuous moment in this source video for a documentary "
+        f"shot described as: {query!r}. Prefer a visually specific moment, not a title "
+        "card or unrelated filler. Return ONLY compact JSON with numeric seconds: "
+        '{"start": 12.5, "end": 19.5, "reason": "short reason"}. '
+        f"Aim for about {target:.1f} seconds. start must be >= 0 and end > start."
+    )
+    answer = analyze_clip(
+        video_url=video_url,
+        prompt=prompt,
+        max_tokens=_PEGASUS_MIN_MAX_TOKENS,
+    )
+    if not answer:
+        return None
+
+    text = str(answer).strip()
+    match = re.search(r"\{.*?\}", text, flags=re.DOTALL)
+    if not match:
+        logger.warning("TwelveLabs smart trim returned no JSON object")
+        return None
+    try:
+        payload = json.loads(match.group(0))
+        start = float(payload.get("start"))
+        end = float(payload.get("end"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("TwelveLabs smart trim returned invalid JSON/timestamps")
+        return None
+
+    if not (math.isfinite(start) and math.isfinite(end)):
+        return None
+    start = max(0.0, start)
+    if source_duration is not None:
+        try:
+            limit = float(source_duration)
+        except (TypeError, ValueError):
+            limit = 0.0
+        if math.isfinite(limit) and limit > 0:
+            start = min(start, max(0.0, limit - 0.1))
+            end = min(end, limit)
+    if end <= start:
+        return None
+
+    return {
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "reason": str(payload.get("reason") or "").strip(),
+    }
